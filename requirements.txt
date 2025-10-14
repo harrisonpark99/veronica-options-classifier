@@ -1,9 +1,11 @@
-streamlit>=1.37.0
-pandas>=2.0.0
-numpy>=1.24.0
-requests>=2.31.0
-certifi>=2024.2.2
-python-dateutil>=2.8.2
-pytz
-zoneinfo; python_version>="3.9"
-openpyxl>=3.1.2
+# ✅ Compatible with Python 3.13 on Streamlit Cloud
+streamlit>=1.50.0
+pandas>=2.3.0
+numpy>=2.3.0
+requests>=2.32.0
+certifi>=2024.8.30
+python-dateutil>=2.9.0.post0
+pytz>=2024.1
+# zoneinfo is in the stdlib for Python >=3.9, use backport only for older Pythons
+backports.zoneinfo; python_version<"3.9"
+openpyxl>=3.1.5
