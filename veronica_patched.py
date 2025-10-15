@@ -2,9 +2,10 @@
 """
 VERONICA XUNKE SUPPORT (Patched & Refactored)
 - TLS 인증서 경로 자동 설정 (certifi)
-- 코드 모듈화(블록화) / 간결화
+- 코드 모듈화 / 간결화
 - 기능 유지: 분류, Coinglass 종가(과거), Binance 현재가(실시간), 집계/필터/다운로드, 디버그 툴
-- 🔐 추가: st.secrets 기반 비밀번호 게이트 (안정화)
+- 🔐 st.secrets 기반 비밀번호 게이트 (안전비교 + 공백/개행 제거)
+- 🛡️ 업로드/세션 가드 보강 (NoneType.head 방지, 실패 시 기존 데이터 유지)
 """
 
 # ================== Bootstrap & Globals ==================
@@ -19,7 +20,7 @@ from typing import Dict, List, Tuple, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timezone, timedelta
 
-# TLS 인증서 경로 자동 설정 (requests가 신뢰 루트 못 찾는 환경 대응)
+# TLS 인증서 경로 자동 설정
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
@@ -36,8 +37,8 @@ KST = ZoneInfo("Asia/Seoul")
 # ================== Auth Gate (with st.secrets) ==================
 st.set_page_config(page_title="CSV 옵션 딜 분류기 (Patched)", layout="wide", initial_sidebar_state="expanded")
 
-# st.secrets 로부터 비밀번호 불러오기 (환경변수 fallback 포함) + 공백 제거
-APP_PASSWORD = str(st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", ""))).strip()
+# st.secrets / 환경변수에서 비밀번호 불러오기
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", ""))
 
 if "auth_ok" not in st.session_state:
     st.session_state.auth_ok = False
@@ -46,14 +47,15 @@ if not st.session_state.auth_ok:
     st.title("🔐 패스워드를 입력하세요")
     st.caption("인증 후에 메인 화면으로 이동합니다.")
     pw = st.text_input("Password", type="password", placeholder="패스워드 입력")
-    col_ok, _ = st.columns([1, 3])
-    with col_ok:
-        confirm = st.button("확인", type="primary")
+    confirm = st.button("확인", type="primary")
+
     if confirm:
-        if not APP_PASSWORD:
+        if not str(APP_PASSWORD).strip():
             st.error("서버에 비밀번호가 설정되어 있지 않습니다. 관리자에게 문의하세요.")
         else:
-            if hmac.compare_digest((pw or "").strip(), APP_PASSWORD):
+            pw_norm = (pw or "").strip()
+            app_pw_norm = str(APP_PASSWORD).strip()
+            if hmac.compare_digest(pw_norm, app_pw_norm):
                 st.session_state.auth_ok = True
                 st.rerun()
             else:
@@ -89,17 +91,15 @@ TOKEN_ALIASES = {
     "BCHSV": "BSV",
 }
 
-# Coinglass API Key 우선순위: secrets.toml > 환경변수 (하드코딩 기본값 제거)
-DEFAULT_COINGLASS_API_KEY = ""  # 보안을 위해 빈 값 유지
+# Coinglass API Key 우선순위: secrets.toml > 환경변수 (하드코딩 기본값 없음)
 def _get_secret(name: str, default: str = "") -> str:
-    """Streamlit secrets가 없을 때도 안전하게 읽기."""
     try:
         return st.secrets.get(name, default)
     except Exception:
         return os.environ.get(name, default)
 
-COINGLASS_API_KEY = _get_secret("COINGLASS_API_KEY", "") or DEFAULT_COINGLASS_API_KEY
-CG_HEADERS = {"CG-API-KEY": COINGLASS_API_KEY}
+COINGLASS_API_KEY = _get_secret("COINGLASS_API_KEY", "")
+CG_HEADERS = {"CG-API-KEY": COINGLASS_API_KEY} if COINGLASS_API_KEY else {}
 
 # ================== Utilities (Parsing / Dates / Normalization) ==================
 def parse_symbol(symbol: str) -> Dict:
@@ -512,49 +512,251 @@ def optimize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return b"" if df is None else df.to_csv(index=False).encode("utf-8")
 
+# ================== Core Pipeline ==================
+def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=None) -> Dict:
+    coupon_whitelist = normalize_party_list(config.coupon_parties)
+    coupon_quote_set = normalize_quote_list(config.coupon_quotes)
+    covered_call_whitelist = normalize_party_list(config.covered_call_parties)
+    today = datetime.now(KST).date()
+
+    # 1) 심볼/타임스탬프 수집
+    pair_ts_pairs: List[Tuple[str, object]] = []
+    current_symbols: List[str] = []
+
+    for _, r in df_raw.iterrows():
+        sym = str(r.get("Symbol", ""))
+        parsed = parse_symbol(sym)
+        base, quote, opt = parsed.get("base", ""), parsed.get("quote", ""), parsed.get("option", "")
+        cp = r.get("Counterparty", "")
+        ptype = infer_product_type(base, opt, quote, cp, sym, coupon_whitelist, coupon_quote_set, covered_call_whitelist)
+        token_type = quote if ("Bonus Coupon" in ptype) else base
+        pair_symbol = make_pair_symbol(token_type)
+
+        start_ts = pd.to_datetime(r.get(config.trade_field, pd.NaT), errors="coerce", utc=False)
+        trade_ts = start_ts if pd.notna(start_ts) else pd.to_datetime(r.get("Expiry Time", pd.NaT), errors="coerce", utc=False)
+        trade_ts = trade_ts if pd.notna(trade_ts) else datetime.now(KST)
+
+        if pair_symbol:
+            if pair_symbol != "USDT":
+                pair_ts_pairs.append((pair_symbol, trade_ts))
+            current_symbols.append(pair_symbol)
+
+    # 2) 과거 종가 배치
+    if progress_placeholder:
+        progress_placeholder.info(f"📊 가격 데이터 조회 중... (고유 조합 {len(set(pair_ts_pairs))}개)")
+    price_cache = get_batch_prices_coinglass(pair_ts_pairs)
+
+    # 3) 현재가 배치
+    current_price_map = get_batch_current_prices(current_symbols)
+
+    # 3.5) 거래일 종가 배치 (Binance)
+    pair_date_pairs = [
+        (p, resolve_trade_utc_date(ts))
+        for (p, ts) in pair_ts_pairs
+        if p and p != "USDT" and pd.notna(pd.to_datetime(ts, errors="coerce"))
+    ]
+    trade_close_map = get_batch_binance_closes(pair_date_pairs)
+
+    # 4) 레코드 변환
+    rows = []
+    if progress_placeholder:
+        pbar = progress_placeholder.progress(0); ptxt = progress_placeholder.empty()
+    total = len(df_raw) or 1
+
+    for i, (_, r) in enumerate(df_raw.iterrows(), 1):
+        if progress_placeholder:
+            pbar.progress(i/total); ptxt.text(f"처리 중... {i}/{total}")
+        sym = str(r.get("Symbol", ""))
+        parsed = parse_symbol(sym)
+        base, quote, opt = parsed.get("base", ""), parsed.get("quote", ""), parsed.get("option", "")
+        cp = r.get("Counterparty", "")
+        ptype = infer_product_type(base, opt, quote, cp, sym, coupon_whitelist, coupon_quote_set, covered_call_whitelist)
+
+        expiry_ts = pd.to_datetime(r.get("Expiry Time", pd.NaT), errors="coerce", utc=False)
+        start_ts = pd.to_datetime(r.get(config.trade_field, pd.NaT), errors="coerce", utc=False)
+        month_diff = calculate_month_difference(start_ts, expiry_ts) if (pd.notna(expiry_ts) and pd.notna(start_ts)) else None
+
+        qty_raw = str(r.get("Qty", ""))
+        try:
+            qty_num = pd.to_numeric(qty_raw.replace(",", "").replace(" ", ""), errors="coerce")
+        except Exception:
+            qty_num = pd.NA
+
+        token_type = quote if ("Bonus Coupon" in ptype) else base
+        pair_symbol = make_pair_symbol(token_type)
+
+        # 거래일 UTC 일자
+        key_date = resolve_trade_utc_date(
+            start_ts if pd.notna(start_ts) else (expiry_ts if pd.notna(expiry_ts) else datetime.now(KST))
+        )
+
+        price_close = None; qty_usd_trade = None
+        if pd.notna(qty_num):
+            if pair_symbol == "USDT":
+                price_close = 1.0; qty_usd_trade = float(qty_num)
+            else:
+                key_date = resolve_trade_utc_date(start_ts if pd.notna(start_ts) else (expiry_ts if pd.notna(expiry_ts) else datetime.now(KST)))
+                price_close = price_cache.get((pair_symbol, key_date))
+                qty_usd_trade = (float(qty_num) * float(price_close)) if price_close is not None else None
+
+        trade_date_bin_px = 1.0 if pair_symbol == "USDT" else trade_close_map.get((pair_symbol, key_date))
+        qty_usd_trade_bin = (float(qty_num) * float(trade_date_bin_px)) if (pd.notna(qty_num) and (trade_date_bin_px is not None)) else None
+        cur_px = current_price_map.get(pair_symbol, None)
+        qty_usd_cur = (float(qty_num) * float(cur_px)) if (pd.notna(qty_num) and cur_px is not None) else None
+
+        qxm = (float(qty_usd_trade_bin) * float(month_diff)) if (qty_usd_trade_bin is not None and month_diff is not None) else None
+
+        exp_str_from_iso = extract_iso_date_to_str(r.get("Expiry Time", "")) or yyyymmdd_to_mdy_str(parsed.get("expiry", ""))
+        exp_date = extract_iso_date_to_date(r.get("Expiry Time", "")) or yyyymmdd_to_date(parsed.get("expiry", ""))
+        trade_date_str = extract_iso_date_to_str(r.get(config.trade_field, ""))
+
+        rows.append({
+            "Counterparty": cp,
+            "Product Type": ptype,
+            "Token Type": token_type,
+            "API Symbol": pair_symbol,
+            "Token Amount": qty_raw,
+            "Qty": qty_raw,
+            "Current Price (USD)": cur_px,
+            "Trade Date Price (USD, Binance)": trade_date_bin_px,
+            "Qty USD (Current)": qty_usd_cur,
+            "Month Difference": month_diff,
+            "Qty * Month (USD)": qxm,
+            "Trade Date": trade_date_str,
+            "Expiry Date": exp_str_from_iso,
+            "_expiry_date_obj": exp_date,
+            "_trade_date_obj": start_ts.date() if pd.notna(start_ts) else None,
+        })
+
+    if progress_placeholder:
+        pbar.empty(); ptxt.empty()
+
+    out = pd.DataFrame(rows)
+
+    # 내부 계산용 컬럼 제거
+    out = out.drop(columns=["Price Close (USD on Trade Date)", "Qty USD (on Trade Date)"], errors="ignore")
+
+    # 표시 컬럼 순서
+    desired_order = [
+        "Counterparty", "Product Type", "Token Type", "API Symbol",
+        "Token Amount", "Qty",
+        "Current Price (USD)", "Trade Date Price (USD, Binance)", "Qty USD (Current)",
+        "Month Difference", "Qty * Month (USD)",
+        "Trade Date", "Expiry Date",
+        "Current Price Debug"
+    ]
+    cols = [c for c in desired_order if c in out.columns] + [c for c in out.columns if c not in desired_order]
+    out = out[cols]
+
+    if not out.empty and pd.api.types.is_object_dtype(out["_expiry_date_obj"]):
+        out["_expiry_date_obj"] = pd.to_datetime(out["_expiry_date_obj"]).dt.tz_localize(None)
+
+    # 만기 필터
+    today = datetime.now(KST).date()
+    today_ts = pd.to_datetime(today)
+    nonexp = out[out["_expiry_date_obj"].notna() & (out["_expiry_date_obj"] >= today_ts)].copy()
+
+    def month_offset(y: int, m: int, k: int):
+        nm = m + k
+        return y + (nm - 1)//12, ((nm - 1)%12)+1
+
+    y, m = today.year, today.month
+    y1, m1 = month_offset(y, m, 1); y2, m2 = month_offset(y, m, 2); y3, m3 = month_offset(y, m, 3)
+
+    def filter_by_month(df_in: pd.DataFrame, yy: int, mm: int):
+        if df_in.empty:
+            return df_in
+        cond = df_in["_expiry_date_obj"].notna() & (df_in["_expiry_date_obj"].dt.year == yy) & (df_in["_expiry_date_obj"].dt.month == mm)
+        return df_in[cond].copy()
+
+    m1_df = filter_by_month(out, y1, m1); m2_df = filter_by_month(out, y2, m2); m3_df = filter_by_month(out, y3, m3)
+
+    def display(df_in: pd.DataFrame) -> pd.DataFrame:
+        return df_in if (df_in is None or df_in.empty) else df_in.drop(columns=["_expiry_date_obj", "_trade_date_obj"], errors="ignore")
+
+    full_display = apply_output_filters(display(out), config.exclude_mm, config.exclude_unknown)
+    nonexp_display = apply_output_filters(display(nonexp), config.exclude_mm, config.exclude_unknown)
+    m1_display = apply_output_filters(display(m1_df), config.exclude_mm, config.exclude_unknown)
+    m2_display = apply_output_filters(display(m2_df), config.exclude_mm, config.exclude_unknown)
+    m3_display = apply_output_filters(display(m3_df), config.exclude_mm, config.exclude_unknown)
+
+    # 집계
+    agg_nonexp = aggregate_by_product_type(nonexp_display)
+    agg_m1 = aggregate_by_product_type(m1_display)
+    agg_m2 = aggregate_by_product_type(m2_display)
+    agg_m3 = aggregate_by_product_type(m3_display)
+
+    start_of_year = date(today.year, 1, 1)
+    out_with_filters = apply_output_filters(out, config.exclude_mm, config.exclude_unknown)
+    year_mask = out_with_filters["_trade_date_obj"].notna() & (pd.to_datetime(out_with_filters["_trade_date_obj"]).dt.date >= start_of_year)
+    full_display_this_year = out_with_filters[year_mask].copy()
+    agg_qty_month_cp = aggregate_qty_month_by_counterparty(full_display_this_year)
+
+    # 현재가 스냅샷
+    unique_syms = sorted(set(full_display["API Symbol"].dropna().astype(str).replace("", pd.NA).dropna().tolist())) if isinstance(full_display, pd.DataFrame) and not full_display.empty else []
+    current_price_table = pd.DataFrame([{ "API Symbol": s, "Current Price (USD)": current_price_map.get(s)} for s in unique_syms])
+
+    return {
+        "full": full_display,
+        "nonexp": nonexp_display,
+        "m1": m1_display,
+        "m2": m2_display,
+        "m3": m3_display,
+        "agg_nonexp": agg_nonexp,
+        "agg_m1": agg_m1,
+        "agg_m2": agg_m2,
+        "agg_m3": agg_m3,
+        "agg_qty_month_cp": agg_qty_month_cp,
+        "current_prices": current_price_table,
+        "msg": "✅ 완료! Coinglass 종가 + Binance 현재가 반영 (TLS 인증서 자동 설정 포함)",
+    }
+
 # ================== UI (Streamlit) ==================
 st.title("VERONICA XUNKE SUPPORT · Patched")
 st.caption("TLS 인증서 자동 설정, 코드 모듈화, 기능 유지 · 🔐 내부 접근 보호")
-
-# ✅ session_state 기본값 초기화 (접근 오류 방지)
-for key, default in {
-    "df_raw": None,
-    "file_hash": None,
-    "last_result": None,
-    "last_keys": None,
-    "debug_mode": False,
-    "auto_run": True,
-}.items():
-    if key not in st.session_state:
-        st.session_state[key] = default
 
 # Sidebar
 with st.sidebar:
     st.header("⚙️ 설정")
     config = AppConfig.load_from_session()
 
+    # (선택) 데이터 리셋 버튼
+    if st.button("데이터 리셋", help="불러온 CSV와 캐시 초기화"):
+        st.session_state.pop("df_raw", None)
+        st.session_state.pop("file_hash", None)
+        st.session_state.pop("last_result", None)
+        st.session_state.pop("last_keys", None)
+        st.rerun()
+
     uploaded = st.file_uploader("📁 CSV 업로드", type=["csv"])
     if uploaded is not None:
         try:
-            raw = uploaded.getvalue(); file_hash = hashlib.md5(raw).hexdigest()
+            raw = uploaded.getvalue()
+            file_hash = hashlib.md5(raw).hexdigest()
             if st.session_state.get("file_hash") != file_hash:
                 with st.spinner("CSV 파일 로드 중..."):
-                    df_raw = read_csv_safely(uploaded)
-                    # Validate
+                    df_candidate = read_csv_safely(uploaded)
+
+                    # 필수 컬럼 체크
                     required = ['Symbol', 'Counterparty', 'Qty']
-                    missing_required = [c for c in required if c not in df_raw.columns]
+                    missing_required = [c for c in required if c not in df_candidate.columns]
                     if missing_required:
-                        st.error(f"❌ 필수 컬럼 누락: {', '.join(missing_required)}"); st.stop()
-                    # Optional warn
+                        st.error(f"❌ 필수 컬럼 누락: {', '.join(missing_required)}")
+                        st.stop()
+
+                    # 선택 컬럼 경고
                     optional = ['Expiry Time', 'Created Time', 'Initiation Time']
-                    missing_optional = [c for c in optional if c not in df_raw.columns]
+                    missing_optional = [c for c in optional if c not in df_candidate.columns]
                     if missing_optional:
                         st.warning(f"⚠️ 선택적 컬럼 누락: {', '.join(missing_optional)} - 일부 기능 제한될 수 있음")
+
                     st.success("✅ 데이터 검증 완료")
-                    st.session_state.df_raw = df_raw
+                    # 성공시에만 저장
+                    st.session_state.df_raw = df_candidate
                     st.session_state.file_hash = file_hash
         except Exception as e:
-            st.error(f"CSV 로드 실패: {e}"); st.stop()
+            st.error(f"CSV 로드 실패: {e}")
+            st.stop()
 
     config.trade_field = st.radio("📅 Trade Date 기준", ["Created Time", "Initiation Time"], index=0 if config.trade_field == "Created Time" else 1)
 
@@ -576,15 +778,9 @@ with st.sidebar:
         st.session_state.debug_mode = debug_mode
 
     # Counterparty 자동완성
-    if st.session_state.df_raw is not None and "Counterparty" in st.session_state.df_raw.columns:
-        vals = (
-            st.session_state.df_raw["Counterparty"]
-            .dropna().astype(str).map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist()
-        )
+    if isinstance(st.session_state.get("df_raw"), pd.DataFrame) and "Counterparty" in st.session_state.df_raw.columns:
+        vals = (st.session_state.df_raw["Counterparty"].dropna().astype(str).map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist())
         st.session_state.cp_catalog = sorted(set(vals), key=lambda s: s.lower())
-    else:
-        st.session_state.cp_catalog = []
-
     cp_search = st.text_input("🔍 Counterparty 검색", placeholder="입력하면서 자동완성...")
 
     def suggest(q: str, catalog: List[str], limit: int = 10) -> List[str]:
@@ -622,8 +818,10 @@ with st.sidebar:
 
 # Main
 st.caption("⚡ 업로드 후 좌측 필터를 조정하면 아래 표/요약이 갱신됩니다.")
-df_raw = st.session_state.get("df_raw")
-if df_raw is None:
+
+# ✅ None 방지: 존재 + 타입 확인
+df_raw = st.session_state.get("df_raw", None)
+if not isinstance(df_raw, pd.DataFrame):
     st.info("📂 좌측 사이드바에서 CSV를 업로드하세요.")
     st.stop()
 
@@ -658,7 +856,8 @@ if need_run:
         st.session_state.last_result = result
         st.session_state.last_keys = (st.session_state.get("file_hash"), _hash_config(AppConfig.load_from_session()))
     except Exception as e:
-        st.error(f"처리 중 오류: {e}"); st.stop()
+        st.error(f"처리 중 오류: {e}")
+        st.stop()
 else:
     result = st.session_state.get("last_result")
 
@@ -666,7 +865,6 @@ if not result:
     st.stop()
 
 st.success(result.get("msg", "완료"))
-st.caption(result.get("today_info", ""))
 
 # Tabs
 (tab_all, tab_nonexp, tab_m1, tab_m2, tab_m3, tab_summary, tab_cp, tab_px, tab_debug) = st.tabs([
@@ -724,8 +922,7 @@ with tab_px:
 with tab_debug:
     st.subheader("현재가 None 진단 도구")
     if st.session_state.get("debug_mode", False):
-        unique_syms = (result["current_prices"]["API Symbol"].dropna().astype(str).unique().tolist()
-                       if isinstance(result.get("current_prices"), pd.DataFrame) and not result["current_prices"].empty else [])
+        unique_syms = (result["current_prices"]["API Symbol"].dropna().astype(str).unique().tolist() if isinstance(result.get("current_prices"), pd.DataFrame) and not result["current_prices"].empty else [])
         st.markdown("**(1) 배치 진단 테이블**")
         dbg_df = build_current_price_debug_table(unique_syms) if unique_syms else pd.DataFrame()
         table_with_download(dbg_df, "current_price_debug", "dbg_batch")
