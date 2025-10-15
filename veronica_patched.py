@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-VERONICA XUNKE SUPPORT (Patched, OKX-only)
+VERONICA XUNKE SUPPORT (Patched, OKX-only, Trade-Date Close Fixed)
 - 🔐 st.secrets 비밀번호 게이트
-- ✅ OKX로 현재가/과거 종가(1D) 모두 조회 (Binance/Coinglass 제거)
-- 💪 벌크 티커 후 누락분 개별 폴백, instId 정규화로 매칭 오류 방지
+- ✅ OKX 단일 소스로 현재가/과거 종가(1D) 조회
+- 💪 현재가: 벌크 티커 → 누락분 개별 폴백
+- 📅 거래일 종가: candles + history-candles 페이지네이션으로 안정 조회
 - 기능 유지: 분류, 집계/필터/다운로드, 디버그 툴
 """
 
@@ -246,12 +247,49 @@ def get_batch_current_prices_okx(inst_ids: List[str]) -> Dict[str, Optional[floa
                     pass
     return results
 
+# ---- 캔들 페이징 (공용) ----
+@st.cache_data(show_spinner=False, ttl=900)
+def _okx_fetch_candles_page(inst_id: str, *, bar: str = "1D",
+                            limit: int = 200, before: Optional[int] = None,
+                            use_history: bool = False) -> List[List]:
+    """
+    OKX 1페이지 캔들 조회.
+    - use_history=False  → /market/candles (최근 구간)
+    - use_history=True   → /market/history-candles (과거 아카이브)
+    반환: [[ts_ms, o, h, l, c, ...], ...]  (보통 최신→오래된 순)
+    """
+    iid = norm_inst_id(inst_id)
+    if not iid:
+        return []
+
+    endpoint = "/api/v5/market/history-candles" if use_history else "/api/v5/market/candles"
+    params = {"instId": iid, "bar": bar, "limit": limit}
+    if before is not None:
+        params["before"] = int(before)
+
+    try:
+        r = requests.get(f"{OKX_BASE}{endpoint}", params=params, timeout=10, verify=certifi.where())
+        if r.status_code != 200:
+            return []
+        js = r.json()
+        if js.get("code") != "0":
+            return []
+        data = js.get("data", [])
+        try:
+            data.sort(key=lambda k: int(k[0]), reverse=True)
+        except Exception:
+            pass
+        return data
+    except Exception:
+        return []
+
+# ---- 거래일(UTC) 종가 조회 (페이지네이션 포함) ----
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_okx_daily_close_for_date(inst_id: str, utc_day: date) -> Tuple[Optional[float], str]:
     """
-    특정 UTC 일자의 종가(1D close) 조회.
-    OKX /market/history-candles → [ts, o, h, l, c, ...] 형식.
-    날짜 매칭 실패 시 근접(±3일) 탐색.
+    특정 UTC 일자(00:00~23:59:59)의 1D 종가를 OKX에서 조회.
+    1) /market/candles(최근)에서 먼저 찾고
+    2) 없으면 /market/history-candles 를 before 커서로 여러 페이지 내려가며 찾는다.
     """
     iid = norm_inst_id(inst_id)
     if not iid:
@@ -259,62 +297,80 @@ def get_okx_daily_close_for_date(inst_id: str, utc_day: date) -> Tuple[Optional[
     if iid == "USDT":
         return 1.0, "stablecoin"
 
-    # 요청 범위: 대상일 기준 앞뒤 3~4일 버퍼
-    start_dt = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc) - timedelta(days=4)
-    end_dt = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc) + timedelta(days=4)
-    start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(end_dt.timestamp() * 1000)
-    params = {
-        "instId": iid,
-        "bar": "1D",
-        "after": start_ms,   # OKX는 after/before 의미가 문서마다 상이 → 여유 범위와 필터링으로 보정
-        "before": end_ms,
-        "limit": 200
-    }
-    try:
-        r = requests.get(f"{OKX_BASE}/api/v5/market/history-candles",
-                         params=params, timeout=10, verify=certifi.where())
-        if r.status_code != 200:
-            return None, f"candles:{r.status_code}"
-        js = r.json()
-        if js.get("code") != "0":
-            return None, f"candles:code:{js.get('code')}"
-        data = js.get("data", [])
-        if not data:
-            return None, "candles:empty"
+    # 타깃 일자 범위(ms)
+    day_start = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc)
+    start_ms = int(day_start.timestamp() * 1000)
+    end_ms = start_ms + 86_400_000 - 1
+    mid_ms = start_ms + 43_200_000
 
-        # 배열 형태: [[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm], ...]
-        # ts는 ms. 특정 utc_day의 종가를 찾는다.
-        target_start = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc)
-        target_ms_start = int(target_start.timestamp() * 1000)
-        target_ms_end = target_ms_start + 86_400_000 - 1
-
+    def pick_from_batch(batch: List[List]) -> Tuple[Optional[float], Optional[int], Optional[int]]:
+        """배치에서 정확 일자 매칭 or 근접값(±1.5d) 선택 + 배치 min/max ts 반환."""
+        if not batch:
+            return None, None, None
+        min_ts = None
+        max_ts = None
         best = None
         best_dist = 1e18
-        mid = target_ms_start + 43_200_000
 
-        for k in data:
+        for row in batch:
             try:
-                ts_ms = int(k[0])
-                close_px = float(k[4])
+                ts_ms = int(row[0])
+                close_px = float(row[4])
             except Exception:
                 continue
-            if target_ms_start <= ts_ms <= target_ms_end:
-                return close_px, "ok"
-            # 근접값 보정(±1.5일)
-            dist = abs(ts_ms - mid)
+            if max_ts is None or ts_ms > max_ts:
+                max_ts = ts_ms
+            if min_ts is None or ts_ms < min_ts:
+                min_ts = ts_ms
+
+            # 정확 매칭
+            if start_ms <= ts_ms <= end_ms:
+                return close_px, min_ts, max_ts
+
+            # 근접(±1.5일) 보정
+            dist = abs(ts_ms - mid_ms)
             if dist < best_dist and dist <= 129_600_000:
                 best = close_px
                 best_dist = dist
+
+        # 정확 매칭 실패 시 근접값 제공
         if best is not None:
-            return best, "nearest"
-        return None, "not_found"
-    except Exception as e:
-        return None, f"EXC:{str(e)[:120]}"
+            return best, min_ts, max_ts
+        return None, min_ts, max_ts
+
+    # 1) 최신 구간에서 시도
+    recent = _okx_fetch_candles_page(iid, bar="1D", limit=200, use_history=False)
+    px, min_ts, max_ts = pick_from_batch(recent)
+    in_range = (start_ms <= (min_ts or 0) <= end_ms) or (start_ms <= (max_ts or 0) <= end_ms)
+    if px is not None and in_range:
+        return px, "ok"
+    if px is not None and not in_range:
+        # 근접값만 잡힌 경우
+        return px, "nearest"
+
+    # 2) history로 페이지네이션 (과거 내려가며 탐색)
+    anchor = (min_ts - 1) if min_ts else int(datetime.now(timezone.utc).timestamp() * 1000)
+    MAX_PAGES = 20  # 20 * 200일 ≈ 4000일(10년+) 커버
+    for _ in range(MAX_PAGES):
+        batch = _okx_fetch_candles_page(iid, bar="1D", limit=200, before=anchor, use_history=True)
+        px, batch_min, batch_max = pick_from_batch(batch)
+        in_range_hist = (start_ms <= (batch_min or 0) <= end_ms) or (start_ms <= (batch_max or 0) <= end_ms)
+        if px is not None:
+            return (px, "ok") if in_range_hist else (px, "nearest")
+        if not batch:
+            break
+        # 다음 페이지를 위해 더 과거로 anchor 이동
+        anchor = (batch_min - 1) if batch_min else (anchor - 86_400_000 * 200)
+
+        # 이미 충분히 과거까지 내려갔다면 종료
+        if anchor < start_ms - 86_400_000 * 2:
+            break
+
+    return None, "not_found"
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_batch_okx_closes(pair_date_pairs: List[Tuple[str, date]]) -> Dict[Tuple[str, date], float]:
-    """여러 (instId, UTC일자)의 1D 종가 배치 조회."""
+    """여러 (instId, UTC일자)의 1D 종가 배치 조회(페이지네이션 포함)."""
     uniq = list({(norm_inst_id(sym), d) for sym, d in pair_date_pairs})
     out: Dict[Tuple[str, date], float] = {}
     if not uniq:
@@ -461,8 +517,7 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
         cp = r.get("Counterparty", "")
         ptype = infer_product_type(base, opt, quote, cp, sym, coupon_whitelist, coupon_quote_set, covered_call_whitelist)
         token_type = quote if ("Bonus Coupon" in ptype) else base
-        inst_id = make_pair_symbol(token_type)
-        inst_id = norm_inst_id(inst_id)
+        inst_id = norm_inst_id(make_pair_symbol(token_type))
 
         start_ts = pd.to_datetime(r.get(config.trade_field, pd.NaT), errors="coerce", utc=False)
         trade_ts = start_ts if pd.notna(start_ts) else pd.to_datetime(r.get("Expiry Time", pd.NaT), errors="coerce", utc=False)
@@ -639,7 +694,7 @@ with st.sidebar:
     st.header("⚙️ 설정")
     config = AppConfig.load_from_session()
 
-    # 캐시 초기화 버튼(간헐적 None 캐시 제거용)
+    # 캐시 초기화 버튼
     if st.button("🧹 캐시/세션 리셋", use_container_width=True):
         st.cache_data.clear()
         for k in ["df_raw", "file_hash", "last_result", "last_keys"]:
