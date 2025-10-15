@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-VERONICA XUNKE SUPPORT (OKX-swapped)
-- Binance API 제거, OKX API로 대체
-- TLS 인증서 경로 자동 설정 (certifi)
-- 기능 유지: 분류, (선택)Coinglass 과거종가, OKX 현재가/과거종가, 집계/필터/다운로드, 디버그 툴
-- 🔐 st.secrets 기반 비밀번호 게이트 (안전비교 + 공백/개행 제거)
-- 🛡️ 업로드/세션 가드 보강 (NoneType.head 방지, 실패 시 기존 데이터 유지)
+VERONICA XUNKE SUPPORT (Patched, OKX-only)
+- 🔐 st.secrets 비밀번호 게이트
+- ✅ OKX로 현재가/과거 종가(1D) 모두 조회 (Binance/Coinglass 제거)
+- 💪 벌크 티커 후 누락분 개별 폴백, instId 정규화로 매칭 오류 방지
+- 기능 유지: 분류, 집계/필터/다운로드, 디버그 툴
 """
 
 # ================== Bootstrap & Globals ==================
 import os
 import re
 import io
-import hmac
 import hashlib
 import difflib
 from dataclasses import dataclass, asdict
@@ -20,7 +18,7 @@ from typing import Dict, List, Tuple, Optional, Set
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date, timezone, timedelta
 
-# TLS 인증서 경로 자동 설정
+# TLS 인증서 경로 자동 설정 (requests가 신뢰 루트 못 찾는 환경 대응)
 import certifi
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
@@ -33,9 +31,10 @@ from dateutil.relativedelta import relativedelta
 from zoneinfo import ZoneInfo
 
 KST = ZoneInfo("Asia/Seoul")
+OKX_BASE = "https://www.okx.com"
 
 # ================== Auth Gate (with st.secrets) ==================
-st.set_page_config(page_title="CSV 옵션 딜 분류기 (OKX)", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="CSV 옵션 딜 분류기 (OKX Patched)", layout="wide", initial_sidebar_state="expanded")
 
 APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", ""))
 
@@ -44,21 +43,17 @@ if "auth_ok" not in st.session_state:
 
 if not st.session_state.auth_ok:
     st.title("🔐 패스워드를 입력하세요")
-    st.caption("인증 후에 메인 화면으로 이동합니다.")
+    st.caption("인증 후 메인 화면으로 이동합니다.")
     pw = st.text_input("Password", type="password", placeholder="패스워드 입력")
-    confirm = st.button("확인", type="primary")
-
+    col_ok, col_sp = st.columns([1, 3])
+    with col_ok:
+        confirm = st.button("확인", type="primary")
     if confirm:
-        if not str(APP_PASSWORD).strip():
-            st.error("서버에 비밀번호가 설정되어 있지 않습니다. 관리자에게 문의하세요.")
+        if pw == APP_PASSWORD and APP_PASSWORD:
+            st.session_state.auth_ok = True
+            st.rerun()
         else:
-            pw_norm = (pw or "").strip()
-            app_pw_norm = str(APP_PASSWORD).strip()
-            if hmac.compare_digest(pw_norm, app_pw_norm):
-                st.session_state.auth_ok = True
-                st.rerun()
-            else:
-                st.error("패스워드가 올바르지 않습니다.")
+            st.error("패스워드가 올바르지 않거나 설정되어 있지 않습니다. 관리자에게 문의하세요.")
     st.stop()
 
 # ================== App Config ==================
@@ -90,17 +85,16 @@ TOKEN_ALIASES = {
     "BCHSV": "BSV",
 }
 
-# ===== (선택) Coinglass API (그대로 유지하고 싶으면 secrets에 키 넣기) =====
-def _get_secret(name: str, default: str = "") -> str:
-    try:
-        return st.secrets.get(name, default)
-    except Exception:
-        return os.environ.get(name, default)
+# ================== Utilities ==================
+def norm_inst_id(s: str) -> str:
+    """OKX instId 표준화: 공백 제거, 대문자, '_'→'-', 스테이블은 'USDT' 고정."""
+    if not isinstance(s, str):
+        return ""
+    up = s.strip().upper().replace("_", "-")
+    if up in {"USDT", "USDC", "USD"}:
+        return "USDT"
+    return up
 
-COINGLASS_API_KEY = _get_secret("COINGLASS_API_KEY", "")
-CG_HEADERS = {"CG-API-KEY": COINGLASS_API_KEY} if COINGLASS_API_KEY else {}
-
-# ================== Utilities (Parsing / Dates / Normalization) ==================
 def parse_symbol(symbol: str) -> Dict:
     if not isinstance(symbol, str):
         return {}
@@ -151,18 +145,14 @@ def calculate_month_difference(start: datetime, end: datetime) -> float:
         return (end - start).days / 30
 
 def make_pair_symbol(token: str) -> str:
-    """
-    입력 토큰을 OKX instId 포맷으로 변환.
-    BTC -> BTC-USDT
-    USD/USDT/USDC -> USDT (1.0 취급, API 호출 생략)
-    """
+    """BTC -> BTC-USDT, USD/USDT/USDC -> USDT (1.0 취급)"""
     if not token:
         return ""
     tk = re.sub(r'[^A-Z0-9]', '', str(token).upper())
     tk = TOKEN_ALIASES.get(tk, tk)
     if tk in {"USD", "USDT", "USDC"}:
-        return "USDT"  # sentinel
-    return f"{tk}-USDT"
+        return "USDT"
+    return norm_inst_id(f"{tk}-USDT")
 
 def resolve_trade_utc_date(ts_val) -> date:
     if ts_val is None or pd.isna(ts_val):
@@ -176,251 +166,160 @@ def resolve_trade_utc_date(ts_val) -> date:
         ts = ts.replace(tzinfo=KST)
     return ts.astimezone(timezone.utc).date()
 
-# ================== (선택) Coinglass – 그대로 유지 ==================
-@st.cache_data(show_spinner=False, ttl=3600)
-def fetch_coinglass_ohlc(exchange: str, symbol: str, market_type: str = "spot", interval: str = "1d", limit: int = 2000):
-    if not COINGLASS_API_KEY:
-        return None
-    url = (
-        "https://open-api-v3.coinglass.com/api/price/ohlc-history"
-        f"?exchange={exchange}&symbol={symbol}&type={market_type}&interval={interval}&limit={limit}"
-    )
+# ================== OKX Market API ==================
+@st.cache_data(show_spinner=False, ttl=10)
+def fetch_okx_tickers_bulk_spot() -> Dict[str, float]:
+    """OKX 스팟 전종목 티커 일괄 조회 → {INSTID: last}"""
+    out: Dict[str, float] = {}
     try:
-        r = requests.get(url, headers=CG_HEADERS, timeout=15, verify=certifi.where())
+        r = requests.get(
+            f"{OKX_BASE}/api/v5/market/tickers",
+            params={"instType": "SPOT"},
+            timeout=10,
+            verify=certifi.where(),
+        )
         if r.status_code != 200:
-            return None
+            return out
         js = r.json()
         if js.get("code") != "0":
-            return None
-        return js.get("data", []) or None
-    except Exception:
-        return None
-
-def _normalize_ts_ms(v) -> Optional[int]:
-    if v is None:
-        return None
-    try:
-        x = float(v)
-        if x < 1e12:
-            x *= 1000.0
-        return int(x)
+            return out
+        for row in js.get("data", []):
+            inst = norm_inst_id(row.get("instId", ""))
+            last = row.get("last")
+            if inst and last not in (None, ""):
+                try:
+                    out[inst] = float(last)
+                except Exception:
+                    pass
     except Exception:
         pass
-    try:
-        dt = pd.to_datetime(v, errors="coerce", utc=True)
-        if pd.isna(dt):
-            return None
-        return int(dt.value // 10**6)
-    except Exception:
-        return None
-
-def find_close_for_utc_date_from_rows(rows, utc_date: date) -> Optional[float]:
-    if not rows:
-        return None
-    day_start = datetime(utc_date.year, utc_date.month, utc_date.day, tzinfo=timezone.utc)
-    start_ms = int(day_start.timestamp() * 1000)
-    end_ms = start_ms + 86_400_000 - 1
-
-    sample = rows[0]
-    t_key = "t" if "t" in sample else ("time" if "time" in sample else None)
-    if t_key is None:
-        return None
-
-    for item in rows:
-        tms = _normalize_ts_ms(item.get(t_key))
-        if tms is None:
-            continue
-        if start_ms <= tms <= end_ms:
-            try:
-                return float(item.get("c"))
-            except Exception:
-                pass
-
-    # closest to midday fallback (±1.5d)
-    best = None; best_dist = 1e18; mid_ms = start_ms + 43_200_000
-    for item in rows:
-        tms = _normalize_ts_ms(item.get(t_key))
-        if tms is None:
-            continue
-        dist = abs(tms - mid_ms)
-        if dist < best_dist:
-            try:
-                c = float(item.get("c")); best, best_dist = c, dist
-            except Exception:
-                continue
-    if best is not None and best_dist <= 129_600_000:
-        return best
-    return None
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def get_batch_prices_coinglass(pair_ts_pairs: List[Tuple[str, object]]) -> Dict[Tuple[str, date], float]:
-    """(선택) Coinglass 과거 종가 캐시 — 키가 없으면 빈 dict"""
-    if not COINGLASS_API_KEY:
-        return {}
-    prices: Dict[Tuple[str, date], float] = {}
-    uniq = list({(p, pd.to_datetime(ts, errors="coerce")) for p, ts in pair_ts_pairs})
-    if not uniq:
-        return prices
-    with ThreadPoolExecutor(max_workers=5) as ex:
-        fut = {ex.submit(_coinglass_one, p, ts): (p, ts) for (p, ts) in uniq}
-        for f in as_completed(fut):
-            p, ts = fut[f]
-            try:
-                px = f.result()
-                if px is not None:
-                    prices[(p, resolve_trade_utc_date(ts))] = px
-            except Exception:
-                pass
-    return prices
-
-def _coinglass_one(pair_symbol: str, trade_ts) -> Optional[float]:
-    if not pair_symbol or pair_symbol == "USDT":
-        return 1.0 if pair_symbol == "USDT" else None
-    utc_d = resolve_trade_utc_date(trade_ts)
-    # Binance → OKX 순으로 예시 (원하면 더 추가)
-    for ex in ["OKX", "Binance", "Bybit", "Bitget"]:
-        rows_spot = fetch_coinglass_ohlc(ex, pair_symbol, market_type="spot", interval="1d", limit=2000)
-        px = find_close_for_utc_date_from_rows(rows_spot, utc_d) if rows_spot else None
-        if px is None:
-            rows_fut = fetch_coinglass_ohlc(ex, pair_symbol, market_type="futures", interval="1d", limit=2000)
-            px = find_close_for_utc_date_from_rows(rows_fut, utc_d) if rows_fut else None
-        if px is not None:
-            return px
-    return None
-
-# ================== OKX API (Binance 대체) ==================
-OKX_BASE = "https://www.okx.com"
+    return out
 
 @st.cache_data(show_spinner=False, ttl=30)
 def fetch_okx_ticker_price(inst_id: str) -> Optional[float]:
-    """OKX 현재가 — /market/ticker"""
-    if not inst_id or inst_id == "USDT":
-        return 1.0 if inst_id == "USDT" else None
-    try:
-        r = requests.get(f"{OKX_BASE}/api/v5/market/ticker",
-                         params={"instId": inst_id}, timeout=8, verify=certifi.where())
-        if r.status_code != 200:
-            return None
-        js = r.json()
-        if js.get("code") == "0" and js.get("data"):
-            return float(js["data"][0]["last"])
-    except Exception:
-        pass
+    """OKX 현재가 단건 — /market/ticker (재시도 포함)"""
+    iid = norm_inst_id(inst_id)
+    if not iid:
+        return None
+    if iid == "USDT":
+        return 1.0
+    params = {"instId": iid}
+    for _ in range(2):
+        try:
+            r = requests.get(f"{OKX_BASE}/api/v5/market/ticker",
+                             params=params, timeout=8, verify=certifi.where())
+            if r.status_code != 200:
+                continue
+            js = r.json()
+            if js.get("code") == "0" and js.get("data"):
+                last = js["data"][0].get("last")
+                if last not in (None, ""):
+                    return float(last)
+        except Exception:
+            pass
     return None
 
 @st.cache_data(show_spinner=False, ttl=15)
-def debug_fetch_okx_ticker(inst_id: str) -> Dict[str, object]:
-    try:
-        r = requests.get(f"{OKX_BASE}/api/v5/market/ticker",
-                         params={"instId": inst_id}, timeout=8, verify=certifi.where())
-        return {
-            "instId": inst_id,
-            "endpoint": "/api/v5/market/ticker",
-            "status": r.status_code,
-            "ok": (r.status_code == 200),
-            "response": r.text[:300]
-        }
-    except Exception as e:
-        return {"instId": inst_id, "endpoint": "/api/v5/market/ticker", "status": "EXC", "ok": False, "response": str(e)[:300]}
+def get_batch_current_prices_okx(inst_ids: List[str]) -> Dict[str, Optional[float]]:
+    """벌크 → 누락분 개별 폴백."""
+    uniq = sorted({norm_inst_id(s) for s in inst_ids if s})
+    results: Dict[str, Optional[float]] = {iid: (1.0 if iid == "USDT" else None) for iid in uniq}
+    if not uniq:
+        return {}
 
-@st.cache_data(show_spinner=False, ttl=15)
-def debug_check_okx_instrument(inst_id: str) -> Dict[str, object]:
-    try:
-        r = requests.get(f"{OKX_BASE}/api/v5/public/instruments",
-                         params={"instType": "SPOT", "instId": inst_id}, timeout=8, verify=certifi.where())
-        ok = False; preview = ""
-        if r.status_code == 200:
-            js = r.json(); ok = (js.get("code") == "0" and len(js.get("data", [])) > 0)
-            preview = r.text[:300]
-        return {"instId": inst_id, "endpoint": "/api/v5/public/instruments", "status": r.status_code, "ok": ok, "response": preview}
-    except Exception as e:
-        return {"instId": inst_id, "endpoint": "/api/v5/public/instruments", "status": "EXC", "ok": False, "response": str(e)[:300]}
+    bulk = fetch_okx_tickers_bulk_spot()
+    for iid in uniq:
+        if iid != "USDT" and iid in bulk:
+            results[iid] = bulk[iid]
 
-def build_current_price_debug_table_okx(inst_ids: List[str]) -> pd.DataFrame:
-    ids = sorted(set([s for s in inst_ids if s]))
-    rows = []
-    for inst in ids:
-        r1 = debug_fetch_okx_ticker(inst)
-        r2 = debug_check_okx_instrument(inst)
-        rows.append({
-            "OKX instId": inst,
-            "ticker_ok": r1.get("ok"),
-            "ticker_status": r1.get("status"),
-            "ticker_preview": r1.get("response"),
-            "inst_exists_ok": r2.get("ok"),
-            "inst_status": r2.get("status"),
-            "inst_preview": r2.get("response"),
-        })
-    return pd.DataFrame(rows)
+    missing = [iid for iid in uniq if iid != "USDT" and results[iid] is None]
+    if missing:
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            fut_map = {ex.submit(fetch_okx_ticker_price, iid): iid for iid in missing}
+            for fut in as_completed(fut_map):
+                iid = fut_map[fut]
+                try:
+                    px = fut.result()
+                    if px is not None:
+                        results[iid] = px
+                except Exception:
+                    pass
+    return results
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def get_okx_daily_close_for_date(inst_id: str, utc_date: date) -> Tuple[Optional[float], str]:
+def get_okx_daily_close_for_date(inst_id: str, utc_day: date) -> Tuple[Optional[float], str]:
     """
-    OKX 1D 캔들에서 특정 UTC 일자의 종가를 조회.
-    /api/v5/market/candles?instId=BTC-USDT&bar=1D&after=...&before=...
-    반환: (close, "ok") or (None, reason)
+    특정 UTC 일자의 종가(1D close) 조회.
+    OKX /market/history-candles → [ts, o, h, l, c, ...] 형식.
+    날짜 매칭 실패 시 근접(±3일) 탐색.
     """
-    if not inst_id:
-        return None, "empty"
-    if inst_id == "USDT":
+    iid = norm_inst_id(inst_id)
+    if not iid:
+        return None, "empty_symbol"
+    if iid == "USDT":
         return 1.0, "stablecoin"
 
-    day_start = datetime(utc_date.year, utc_date.month, utc_date.day, tzinfo=timezone.utc)
-    start_ms = int(day_start.timestamp() * 1000)
-    end_ms = start_ms + 86_400_000 - 1
-
+    # 요청 범위: 대상일 기준 앞뒤 3~4일 버퍼
+    start_dt = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc) - timedelta(days=4)
+    end_dt = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc) + timedelta(days=4)
+    start_ms = int(start_dt.timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
+    params = {
+        "instId": iid,
+        "bar": "1D",
+        "after": start_ms,   # OKX는 after/before 의미가 문서마다 상이 → 여유 범위와 필터링으로 보정
+        "before": end_ms,
+        "limit": 200
+    }
     try:
-        # OKX: after < ts <= before 형식이므로 살짝 여유 버퍼
-        params = {
-            "instId": inst_id,
-            "bar": "1D",
-            "after": start_ms - 1,
-            "before": end_ms + 1,
-            "limit": 100,
-        }
-        r = requests.get(f"{OKX_BASE}/api/v5/market/candles", params=params, timeout=10, verify=certifi.where())
+        r = requests.get(f"{OKX_BASE}/api/v5/market/history-candles",
+                         params=params, timeout=10, verify=certifi.where())
         if r.status_code != 200:
-            return None, f"http:{r.status_code}"
+            return None, f"candles:{r.status_code}"
         js = r.json()
-        if js.get("code") != "0" or not js.get("data"):
-            return None, "empty"
-        # data: list of [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
-        close_px = None
-        for row in js["data"]:
-            ts_ms = int(row[0])
-            if start_ms <= ts_ms <= end_ms:
-                try:
-                    close_px = float(row[4])
-                    break
-                except Exception:
-                    pass
-        if close_px is not None:
-            return close_px, "ok"
+        if js.get("code") != "0":
+            return None, f"candles:code:{js.get('code')}"
+        data = js.get("data", [])
+        if not data:
+            return None, "candles:empty"
 
-        # 근접 일자(±3일) 보정
-        best = None; best_dist = 10**18
-        target = start_ms + 43_200_000
-        for row in js["data"]:
-            ts_ms = int(row[0]); dist = abs(ts_ms - target)
-            if dist < best_dist:
-                try:
-                    best = float(row[4]); best_dist = dist
-                except Exception:
-                    pass
-        if best is not None and best_dist <= 129_600_000:
+        # 배열 형태: [[ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm], ...]
+        # ts는 ms. 특정 utc_day의 종가를 찾는다.
+        target_start = datetime(utc_day.year, utc_day.month, utc_day.day, tzinfo=timezone.utc)
+        target_ms_start = int(target_start.timestamp() * 1000)
+        target_ms_end = target_ms_start + 86_400_000 - 1
+
+        best = None
+        best_dist = 1e18
+        mid = target_ms_start + 43_200_000
+
+        for k in data:
+            try:
+                ts_ms = int(k[0])
+                close_px = float(k[4])
+            except Exception:
+                continue
+            if target_ms_start <= ts_ms <= target_ms_end:
+                return close_px, "ok"
+            # 근접값 보정(±1.5일)
+            dist = abs(ts_ms - mid)
+            if dist < best_dist and dist <= 129_600_000:
+                best = close_px
+                best_dist = dist
+        if best is not None:
             return best, "nearest"
         return None, "not_found"
     except Exception as e:
-        return None, f"EXC:{str(e)[:80]}"
+        return None, f"EXC:{str(e)[:120]}"
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_batch_okx_closes(pair_date_pairs: List[Tuple[str, date]]) -> Dict[Tuple[str, date], float]:
-    """여러 (instId, UTC일자)의 일별 종가 배치 조회 — OKX"""
-    uniq = list({(sym, d) for sym, d in pair_date_pairs})
+    """여러 (instId, UTC일자)의 1D 종가 배치 조회."""
+    uniq = list({(norm_inst_id(sym), d) for sym, d in pair_date_pairs})
     out: Dict[Tuple[str, date], float] = {}
     if not uniq:
         return out
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=6) as ex:
         fut = {ex.submit(get_okx_daily_close_for_date, sym, d): (sym, d) for sym, d in uniq}
         for f in as_completed(fut):
             key = fut[f]
@@ -432,21 +331,32 @@ def get_batch_okx_closes(pair_date_pairs: List[Tuple[str, date]]) -> Dict[Tuple[
                 pass
     return out
 
-@st.cache_data(show_spinner=False, ttl=30)
-def get_batch_current_prices_okx(inst_ids: List[str]) -> Dict[str, Optional[float]]:
-    uniq = sorted({s for s in inst_ids if s})
-    results: Dict[str, Optional[float]] = {s: (1.0 if s == "USDT" else None) for s in uniq}
-    if not uniq:
-        return {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        fut_map = {ex.submit(fetch_okx_ticker_price, s): s for s in uniq if s != "USDT"}
-        for fut in as_completed(fut_map):
-            sym = fut_map[fut]
-            try:
-                results[sym] = fut.result()
-            except Exception:
-                results[sym] = None
-    return results
+# ---- Debug (OKX) ----
+@st.cache_data(show_spinner=False, ttl=10)
+def debug_fetch_okx_ticker(inst_id: str) -> Dict[str, object]:
+    iid = norm_inst_id(inst_id)
+    try:
+        r = requests.get(f"{OKX_BASE}/api/v5/market/ticker",
+                         params={"instId": iid}, timeout=8, verify=certifi.where())
+        return {
+            "OKX instId": iid, "endpoint": "/market/ticker",
+            "ticker_status": r.status_code, "ticker_ok": (r.status_code == 200),
+            "ticker_preview": r.text[:300]
+        }
+    except Exception as e:
+        return {
+            "OKX instId": iid, "endpoint": "/market/ticker",
+            "ticker_status": "EXC", "ticker_ok": False,
+            "ticker_preview": str(e)[:300]
+        }
+
+def build_current_price_debug_table_okx(inst_ids: List[str]) -> pd.DataFrame:
+    ids = sorted(set(norm_inst_id(s) for s in inst_ids if s))
+    rows = []
+    for s in ids:
+        r1 = debug_fetch_okx_ticker(s)
+        rows.append(r1)
+    return pd.DataFrame(rows)
 
 # ================== Business Logic (Classification & Aggregation) ==================
 def infer_product_type(base: str, option: str, quote: str, counterparty: str, symbol: str,
@@ -542,7 +452,7 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
 
     # 1) 심볼/타임스탬프 수집
     pair_ts_pairs: List[Tuple[str, object]] = []
-    current_symbols: List[str] = []
+    current_inst_ids: List[str] = []
 
     for _, r in df_raw.iterrows():
         sym = str(r.get("Symbol", ""))
@@ -551,7 +461,8 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
         cp = r.get("Counterparty", "")
         ptype = infer_product_type(base, opt, quote, cp, sym, coupon_whitelist, coupon_quote_set, covered_call_whitelist)
         token_type = quote if ("Bonus Coupon" in ptype) else base
-        inst_id = make_pair_symbol(token_type)  # OKX instId
+        inst_id = make_pair_symbol(token_type)
+        inst_id = norm_inst_id(inst_id)
 
         start_ts = pd.to_datetime(r.get(config.trade_field, pd.NaT), errors="coerce", utc=False)
         trade_ts = start_ts if pd.notna(start_ts) else pd.to_datetime(r.get("Expiry Time", pd.NaT), errors="coerce", utc=False)
@@ -560,23 +471,20 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
         if inst_id:
             if inst_id != "USDT":
                 pair_ts_pairs.append((inst_id, trade_ts))
-            current_symbols.append(inst_id)
+            current_inst_ids.append(inst_id)
 
-    # (선택) Coinglass 과거 종가 캐시
+    # 2) 과거(거래일) 종가 배치 (OKX)
     if progress_placeholder:
         progress_placeholder.info(f"📊 가격 데이터 조회 중... (고유 조합 {len(set(pair_ts_pairs))}개)")
-    price_cache = get_batch_prices_coinglass(pair_ts_pairs) if COINGLASS_API_KEY else {}
-
-    # 3) 현재가 배치 (OKX)
-    current_price_map = get_batch_current_prices_okx(current_symbols)
-
-    # 3.5) 거래일 종가 배치 (OKX)
     pair_date_pairs = [
         (p, resolve_trade_utc_date(ts))
         for (p, ts) in pair_ts_pairs
         if p and p != "USDT" and pd.notna(pd.to_datetime(ts, errors="coerce"))
     ]
     trade_close_map = get_batch_okx_closes(pair_date_pairs)
+
+    # 3) 현재가 배치 (OKX)
+    current_price_map = get_batch_current_prices_okx(current_inst_ids)
 
     # 4) 레코드 변환
     rows = []
@@ -587,6 +495,7 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
     for i, (_, r) in enumerate(df_raw.iterrows(), 1):
         if progress_placeholder:
             pbar.progress(i/total); ptxt.text(f"처리 중... {i}/{total}")
+
         sym = str(r.get("Symbol", ""))
         parsed = parse_symbol(sym)
         base, quote, opt = parsed.get("base", ""), parsed.get("quote", ""), parsed.get("option", "")
@@ -604,29 +513,19 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
             qty_num = pd.NA
 
         token_type = quote if ("Bonus Coupon" in ptype) else base
-        inst_id = make_pair_symbol(token_type)
+        inst_id = norm_inst_id(make_pair_symbol(token_type))
 
         # 거래일 UTC 일자
         key_date = resolve_trade_utc_date(
             start_ts if pd.notna(start_ts) else (expiry_ts if pd.notna(expiry_ts) else datetime.now(KST))
         )
 
-        # (선택) Coinglass — 안 쓰면 price_close는 None
-        price_close = None; qty_usd_trade = None
-        if pd.notna(qty_num):
-            if inst_id == "USDT":
-                price_close = 1.0; qty_usd_trade = float(qty_num)
-            else:
-                px_cg = price_cache.get((inst_id, key_date)) if price_cache else None
-                price_close = px_cg
-                qty_usd_trade = (float(qty_num) * float(price_close)) if price_close is not None else None
-
-        trade_date_okx_px = 1.0 if inst_id == "USDT" else trade_close_map.get((inst_id, key_date))
-        qty_usd_trade_okx = (float(qty_num) * float(trade_date_okx_px)) if (pd.notna(qty_num) and (trade_date_okx_px is not None)) else None
+        # 가격 계산
+        trade_date_px = 1.0 if inst_id == "USDT" else trade_close_map.get((inst_id, key_date))
+        qty_usd_trade = (float(qty_num) * float(trade_date_px)) if (pd.notna(qty_num) and (trade_date_px is not None)) else None
         cur_px = current_price_map.get(inst_id, None)
         qty_usd_cur = (float(qty_num) * float(cur_px)) if (pd.notna(qty_num) and cur_px is not None) else None
-
-        qxm = (float(qty_usd_trade_okx) * float(month_diff)) if (qty_usd_trade_okx is not None and month_diff is not None) else None
+        qxm = (float(qty_usd_trade) * float(month_diff)) if (qty_usd_trade is not None and month_diff is not None) else None
 
         exp_str_from_iso = extract_iso_date_to_str(r.get("Expiry Time", "")) or yyyymmdd_to_mdy_str(parsed.get("expiry", ""))
         exp_date = extract_iso_date_to_date(r.get("Expiry Time", "")) or yyyymmdd_to_date(parsed.get("expiry", ""))
@@ -636,11 +535,11 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
             "Counterparty": cp,
             "Product Type": ptype,
             "Token Type": token_type,
-            "API Symbol": inst_id,  # OKX instId
+            "API Symbol": inst_id,
             "Token Amount": qty_raw,
             "Qty": qty_raw,
             "Current Price (USD)": cur_px,
-            "Trade Date Price (USD, OKX)": trade_date_okx_px,
+            "Trade Date Price (USD, OKX)": trade_date_px,
             "Qty USD (Current)": qty_usd_cur,
             "Month Difference": month_diff,
             "Qty * Month (USD)": qxm,
@@ -655,17 +554,13 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
 
     out = pd.DataFrame(rows)
 
-    # 내부 계산용 컬럼 제거 (Coinglass 기반 컬럼은 화면에서 숨김)
-    out = out.drop(columns=["Price Close (USD on Trade Date)", "Qty USD (on Trade Date)"], errors="ignore")
-
-    # 표시 컬럼 순서
+    # ---- Display trimming & column order ----
     desired_order = [
         "Counterparty", "Product Type", "Token Type", "API Symbol",
         "Token Amount", "Qty",
         "Current Price (USD)", "Trade Date Price (USD, OKX)", "Qty USD (Current)",
         "Month Difference", "Qty * Month (USD)",
         "Trade Date", "Expiry Date",
-        "Current Price Debug"
     ]
     cols = [c for c in desired_order if c in out.columns] + [c for c in out.columns if c not in desired_order]
     out = out[cols]
@@ -674,7 +569,6 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
         out["_expiry_date_obj"] = pd.to_datetime(out["_expiry_date_obj"]).dt.tz_localize(None)
 
     # 만기 필터
-    today = datetime.now(KST).date()
     today_ts = pd.to_datetime(today)
     nonexp = out[out["_expiry_date_obj"].notna() & (out["_expiry_date_obj"] >= today_ts)].copy()
 
@@ -715,7 +609,9 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
     agg_qty_month_cp = aggregate_qty_month_by_counterparty(full_display_this_year)
 
     # 현재가 스냅샷
-    unique_syms = sorted(set(full_display["API Symbol"].dropna().astype(str).replace("", pd.NA).dropna().tolist())) if isinstance(full_display, pd.DataFrame) and not full_display.empty else []
+    unique_syms = sorted(set(
+        norm_inst_id(s) for s in full_display["API Symbol"].dropna().astype(str).replace("", pd.NA).dropna().tolist()
+    )) if isinstance(full_display, pd.DataFrame) and not full_display.empty else []
     current_price_table = pd.DataFrame([{ "API Symbol": s, "Current Price (USD)": current_price_map.get(s)} for s in unique_syms])
 
     return {
@@ -730,55 +626,48 @@ def classify_core(df_raw: pd.DataFrame, config: AppConfig, progress_placeholder=
         "agg_m3": agg_m3,
         "agg_qty_month_cp": agg_qty_month_cp,
         "current_prices": current_price_table,
-        "msg": "✅ 완료! OKX 현재가 + OKX 거래일 종가 적용 (Coinglass는 선택적)",
+        "msg": "✅ 완료! OKX 종가/현재가 반영 (TLS 인증서 자동 설정 포함)",
+        "today_info": f"오늘(Asia/Seoul): {today.isoformat()}"
     }
 
 # ================== UI (Streamlit) ==================
-st.title("VERONICA XUNKE SUPPORT · OKX")
-st.caption("OKX API 기반 현재가/과거가, TLS 인증서 자동 설정, 코드 모듈화, 🔐 내부 접근 보호")
+st.title("VERONICA XUNKE SUPPORT · OKX Patched")
+st.caption("OKX 단일 소스로 가격 조회 · 모듈화 · 내부 접근 보호")
 
 # Sidebar
 with st.sidebar:
     st.header("⚙️ 설정")
     config = AppConfig.load_from_session()
 
-    # (선택) 데이터 리셋 버튼
-    if st.button("데이터 리셋", help="불러온 CSV와 캐시 초기화"):
-        st.session_state.pop("df_raw", None)
-        st.session_state.pop("file_hash", None)
-        st.session_state.pop("last_result", None)
-        st.session_state.pop("last_keys", None)
-        st.rerun()
+    # 캐시 초기화 버튼(간헐적 None 캐시 제거용)
+    if st.button("🧹 캐시/세션 리셋", use_container_width=True):
+        st.cache_data.clear()
+        for k in ["df_raw", "file_hash", "last_result", "last_keys"]:
+            st.session_state.pop(k, None)
+        st.success("캐시/세션이 초기화되었습니다. CSV를 다시 업로드하세요.")
 
     uploaded = st.file_uploader("📁 CSV 업로드", type=["csv"])
     if uploaded is not None:
         try:
-            raw = uploaded.getvalue()
-            file_hash = hashlib.md5(raw).hexdigest()
+            raw = uploaded.getvalue(); file_hash = hashlib.md5(raw).hexdigest()
             if st.session_state.get("file_hash") != file_hash:
                 with st.spinner("CSV 파일 로드 중..."):
-                    df_candidate = read_csv_safely(uploaded)
-
-                    # 필수 컬럼 체크
+                    df_raw = read_csv_safely(uploaded)
+                    # Validate
                     required = ['Symbol', 'Counterparty', 'Qty']
-                    missing_required = [c for c in required if c not in df_candidate.columns]
+                    missing_required = [c for c in required if c not in df_raw.columns]
                     if missing_required:
-                        st.error(f"❌ 필수 컬럼 누락: {', '.join(missing_required)}")
-                        st.stop()
-
-                    # 선택 컬럼 경고
+                        st.error(f"❌ 필수 컬럼 누락: {', '.join(missing_required)}"); st.stop()
+                    # Optional warn
                     optional = ['Expiry Time', 'Created Time', 'Initiation Time']
-                    missing_optional = [c for c in optional if c not in df_candidate.columns]
+                    missing_optional = [c for c in optional if c not in df_raw.columns]
                     if missing_optional:
                         st.warning(f"⚠️ 선택적 컬럼 누락: {', '.join(missing_optional)} - 일부 기능 제한될 수 있음")
-
                     st.success("✅ 데이터 검증 완료")
-                    # 성공시에만 저장
-                    st.session_state.df_raw = df_candidate
+                    st.session_state.df_raw = df_raw
                     st.session_state.file_hash = file_hash
         except Exception as e:
-            st.error(f"CSV 로드 실패: {e}")
-            st.stop()
+            st.error(f"CSV 로드 실패: {e}"); st.stop()
 
     config.trade_field = st.radio("📅 Trade Date 기준", ["Created Time", "Initiation Time"], index=0 if config.trade_field == "Created Time" else 1)
 
@@ -796,11 +685,11 @@ with st.sidebar:
     with col2:
         config.exclude_unknown = st.checkbox("Unknown 제외", config.exclude_unknown)
     with col3:
-        debug_mode = st.checkbox("🧪 디버그 모드(OKX)", value=st.session_state.get("debug_mode", False))
+        debug_mode = st.checkbox("🧪 디버그 모드", value=st.session_state.get("debug_mode", False))
         st.session_state.debug_mode = debug_mode
 
     # Counterparty 자동완성
-    if isinstance(st.session_state.get("df_raw"), pd.DataFrame) and "Counterparty" in st.session_state.df_raw.columns:
+    if "df_raw" in st.session_state and "Counterparty" in st.session_state.df_raw.columns:
         vals = (st.session_state.df_raw["Counterparty"].dropna().astype(str).map(lambda s: s.strip()).replace("", pd.NA).dropna().unique().tolist())
         st.session_state.cp_catalog = sorted(set(vals), key=lambda s: s.lower())
     cp_search = st.text_input("🔍 Counterparty 검색", placeholder="입력하면서 자동완성...")
@@ -840,13 +729,11 @@ with st.sidebar:
 
 # Main
 st.caption("⚡ 업로드 후 좌측 필터를 조정하면 아래 표/요약이 갱신됩니다.")
-
-# ✅ None 방지: 존재 + 타입 확인
-df_raw = st.session_state.get("df_raw", None)
-if not isinstance(df_raw, pd.DataFrame):
+if "df_raw" not in st.session_state or st.session_state.get("df_raw") is None:
     st.info("📂 좌측 사이드바에서 CSV를 업로드하세요.")
     st.stop()
 
+df_raw = st.session_state.df_raw
 with st.expander("원본 데이터 미리보기", expanded=False):
     st.dataframe(df_raw.head(50), use_container_width=True)
     mem_bytes = df_raw.memory_usage(deep=True).sum() if hasattr(df_raw, 'memory_usage') else 0
@@ -878,8 +765,7 @@ if need_run:
         st.session_state.last_result = result
         st.session_state.last_keys = (st.session_state.get("file_hash"), _hash_config(AppConfig.load_from_session()))
     except Exception as e:
-        st.error(f"처리 중 오류: {e}")
-        st.stop()
+        st.error(f"처리 중 오류: {e}"); st.stop()
 else:
     result = st.session_state.get("last_result")
 
@@ -887,10 +773,11 @@ if not result:
     st.stop()
 
 st.success(result.get("msg", "완료"))
+st.caption(result.get("today_info", ""))
 
 # Tabs
 (tab_all, tab_nonexp, tab_m1, tab_m2, tab_m3, tab_summary, tab_cp, tab_px, tab_debug) = st.tabs([
-    "전체", "미만기", "M+1", "M+2", "M+3", "요약(합계)", "Counterparty 합계", "현재가 스냅샷", "디버그"
+    "전체", "미만기", "M+1", "M+2", "M+3", "요약(합계)", "Counterparty 합계", "현재가 스냅샷(OKX)", "디버그"
 ])
 
 def table_with_download(df: Optional[pd.DataFrame], label: str, key: str):
@@ -939,25 +826,23 @@ with tab_cp:
 
 with tab_px:
     st.subheader("API Symbol 현재가 스냅샷 (OKX)")
-    table_with_download(result["current_prices"], "current_prices_snapshot", "px")
+    table_with_download(result["current_prices"], "current_prices_snapshot_okx", "px")
 
 with tab_debug:
-    st.subheader("현재가/심볼 진단 도구 (OKX)")
+    st.subheader("현재가/엔드포인트 진단 (OKX)")
     if st.session_state.get("debug_mode", False):
         unique_ids = (result["current_prices"]["API Symbol"].dropna().astype(str).unique().tolist()
                       if isinstance(result.get("current_prices"), pd.DataFrame) and not result["current_prices"].empty else [])
-        st.markdown("**(1) 배치 진단 테이블 (OKX)**")
         dbg_df = build_current_price_debug_table_okx(unique_ids) if unique_ids else pd.DataFrame()
-        table_with_download(dbg_df, "okx_price_debug", "dbg_okx_batch")
-        st.markdown("**(2) 개별 심볼 점검 (OKX instId 포맷: BTC-USDT)**")
+        table_with_download(dbg_df, "okx_debug", "dbg_okx")
+        st.markdown("**개별 심볼 점검**")
         colx, coly = st.columns([2,1])
         with colx:
-            test_inst = st.text_input("OKX instId 입력 (예: BTC-USDT)")
+            test_sym = st.text_input("OKX instId 입력 (예: BTC-USDT)")
         with coly:
-            if st.button("🔎 테스트") and test_inst:
-                r1 = debug_fetch_okx_ticker(test_inst); r2 = debug_check_okx_instrument(test_inst)
-                st.write({"ticker": r1, "instrument": r2})
+            if st.button("🔎 테스트") and test_sym:
+                st.write(debug_fetch_okx_ticker(test_sym))
     else:
-        st.info("사이드바에서 '🧪 디버그 모드(OKX)'를 켜면 진단 도구가 활성화됩니다.")
+        st.info("사이드바에서 '🧪 디버그 모드'를 켜면 진단 도구가 활성화됩니다.")
 
 st.caption("※ 열 순서 변경/숨김은 표 우측 상단 메뉴에서 조정 가능합니다.")
