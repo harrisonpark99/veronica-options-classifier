@@ -930,7 +930,7 @@ with tab_summary:
         pass
     st.markdown("**미만기 Product Type별 Token Amount 합계**"); table_with_download(result["agg_nonexp"], "agg_nonexpired_by_product_type", "agg_nonexp")
     st.markdown("**M+1 요약**"); table_with_download(result["agg_m1"], "agg_m1_by_product_type", "agg_m1")
-    st.mark다운("**M+2 요약**"); table_with_download(result["agg_m2"], "agg_m2_by_product_type", "agg_m2")
+    st.markdown("**M+2 요약**"); table_with_download(result["agg_m2"], "agg_m2_by_product_type", "agg_m2")
     st.markdown("**M+3 요약**"); table_with_download(result["agg_m3"], "agg_m3_by_product_type", "agg_m3")
 
 with tab_cp:
