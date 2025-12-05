@@ -7,12 +7,17 @@ Created on Mon Mar 31 15:20:39 2025
 """
 
 import streamlit as st
-import yfinance as yf
 import requests
 import numpy as np
 from math import log, sqrt, exp
 from scipy.stats import norm
 import certifi  # ✅ TLS 인증서 번들 경로 문제 해결용
+
+# ================== Auth Check ==================
+if "auth_ok" not in st.session_state or not st.session_state.auth_ok:
+    st.warning("로그인이 필요합니다.")
+    st.switch_page("app.py")
+    st.stop()
 
 # 무위험 금리는 0%로 고정
 risk_free_rate = 0.0
