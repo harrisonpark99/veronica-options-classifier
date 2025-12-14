@@ -52,12 +52,18 @@ veronica-options-classifier/
 pip install -r requirements.txt
 ```
 
-2. Set environment variable or create `.streamlit/secrets.toml`:
-```toml
-APP_PASSWORD = "your_password_here"
+2. Create `.streamlit/secrets.toml` from the example template:
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
-3. Run the app:
+3. Edit `.streamlit/secrets.toml` with your actual credentials:
+```toml
+APP_PASSWORD = "your_password_here"
+COINGLASS_API_KEY = "your_coinglass_api_key_here"
+```
+
+4. Run the app:
 ```bash
 streamlit run app.py
 ```
@@ -66,7 +72,13 @@ streamlit run app.py
 
 1. Connect your GitHub repository to Streamlit Cloud
 2. Set the main file path to `app.py`
-3. Add `APP_PASSWORD` to Secrets in Streamlit Cloud settings
+3. Add secrets in Streamlit Cloud settings (Settings → Secrets):
+```toml
+APP_PASSWORD = "your_password_here"
+COINGLASS_API_KEY = "your_coinglass_api_key_here"
+```
+
+**Note:** Never commit `.streamlit/secrets.toml` to git. Use `.streamlit/secrets.toml.example` as a template.
 
 ## Requirements
 

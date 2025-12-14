@@ -1,1 +1,2 @@
 st.secrets.toml
+.streamlit/secrets.toml
