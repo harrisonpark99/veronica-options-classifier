@@ -28,8 +28,8 @@ st.markdown("이 앱은 Coinglass API와 계산된 또는 직접 입력한 연�
 # 1. 사용자 입력: 티커 및 API 관련
 ticker = st.text_input("티커를 입력하세요 (예: BTCUSDT 또는 ETHUSDT)", value="BTCUSDT")
 
-# Coinglass API Key (본인의 API Key로 교체 가능)
-COINGLASS_API_KEY = "8cca09baf8cc497dbb5a4caba45a41f6"
+# Coinglass API Key from secrets
+COINGLASS_API_KEY = st.secrets["COINGLASS_API_KEY"]
 headers_cg = {"CG-API-KEY": COINGLASS_API_KEY}
 
 # 2. Coinglass 데이터 요청 및 종가 추출
