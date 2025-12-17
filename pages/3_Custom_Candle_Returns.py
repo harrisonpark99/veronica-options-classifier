@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 VERONICA - Custom Candle Return Visualizer
-Binance API를 이용한 커스텀 캔들 수익률 시각화
+OKX API를 이용한 커스텀 캔들 수익률 시각화
 """
 
 # 1) 인증서 환경변수는 가장 먼저 설정
@@ -20,7 +20,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Import utilities
 import sys
@@ -57,36 +57,97 @@ def _make_session():
 
 
 SESSION = _make_session()
+OKX_BASE = "https://www.okx.com"
 
 
 # ================== API Functions ==================
+def norm_inst_id(symbol: str) -> str:
+    """심볼 정규화 (예: BTCUSDT -> BTC-USDT)"""
+    if not symbol:
+        return ""
+    s = symbol.upper().strip()
+    # 이미 OKX 형식인 경우
+    if "-" in s:
+        return s
+    # USDT 페어 변환
+    if s.endswith("USDT"):
+        base = s[:-4]
+        return f"{base}-USDT"
+    return s
+
+
 @st.cache_data(ttl=300, show_spinner=False)
-def get_binance_klines(symbol="BTCUSDT", start=None, end=None):
-    """Binance API: 일봉 데이터 조회"""
-    interval = "1d"
-    limit = 1000
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}&interval={interval}&limit={limit}"
+def get_okx_klines(symbol="BTC-USDT", start=None, end=None):
+    """OKX API: 일봉 데이터 조회 (페이지네이션 포함)"""
+    inst_id = norm_inst_id(symbol)
+    if not inst_id:
+        return None, "Invalid symbol"
+
+    all_candles = []
+
+    # 최신 데이터부터 시작
+    anchor = None
+    max_pages = 20  # 최대 20페이지 (약 4000일)
+
+    for page in range(max_pages):
+        params = {"instId": inst_id, "bar": "1D", "limit": 200}
+        if anchor:
+            params["before"] = anchor
+
+        # 최근 데이터는 /market/candles, 과거 데이터는 /market/history-candles
+        endpoint = "/api/v5/market/candles" if page == 0 else "/api/v5/market/history-candles"
+
+        try:
+            resp = SESSION.get(f"{OKX_BASE}{endpoint}", params=params, timeout=15)
+        except requests.exceptions.SSLError as e:
+            return None, f"TLS/SSL error: {e}"
+        except requests.exceptions.RequestException as e:
+            return None, f"Network error: {e}"
+
+        if resp.status_code != 200:
+            return None, f"API request failed: {resp.status_code} - {resp.text[:200]}"
+
+        try:
+            js = resp.json()
+            if js.get("code") != "0":
+                return None, f"API error: {js.get('msg', 'Unknown error')}"
+
+            data = js.get("data", [])
+            if not data:
+                break
+
+            all_candles.extend(data)
+
+            # 다음 페이지를 위한 anchor 설정 (가장 오래된 타임스탬프)
+            try:
+                timestamps = [int(row[0]) for row in data]
+                anchor = min(timestamps) - 1
+            except:
+                break
+
+            # 시작 날짜에 도달했으면 중단
+            if start:
+                start_ms = int(pd.to_datetime(start).timestamp() * 1000)
+                if anchor < start_ms:
+                    break
+
+        except Exception as e:
+            return None, f"Data parsing error: {str(e)}"
+
+    if not all_candles:
+        return None, "No data returned from API"
 
     try:
-        resp = SESSION.get(url, timeout=15)
-    except requests.exceptions.SSLError as e:
-        return None, f"TLS/SSL error: {e}"
-    except requests.exceptions.RequestException as e:
-        return None, f"Network error: {e}"
-
-    if resp.status_code != 200:
-        return None, f"API request failed: {resp.status_code} - {resp.text[:200]}"
-
-    try:
-        data = resp.json()
-        df = pd.DataFrame(data, columns=[
+        # OKX 캔들 형식: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        df = pd.DataFrame(all_candles, columns=[
             "open_time", "open", "high", "low", "close", "volume",
-            "close_time", "quote_asset_volume", "number_of_trades",
-            "taker_buy_base_vol", "taker_buy_quote_vol", "ignore"
+            "vol_ccy", "vol_ccy_quote", "confirm"
         ])
+
         # 타임존 처리: UTC로 파싱 후 naive로 변환
-        df["date"] = pd.to_datetime(df["open_time"], unit="ms", utc=True).dt.tz_localize(None)
+        df["date"] = pd.to_datetime(df["open_time"].astype(int), unit="ms", utc=True).dt.tz_localize(None)
         df["close"] = df["close"].astype(float)
+        df = df.sort_values("date").reset_index(drop=True)
         df.set_index("date", inplace=True)
         df = df[["close"]]
 
@@ -118,7 +179,7 @@ def generate_custom_returns(df, candle_size):
 
 # ================== UI ==================
 st.title("📈 Custom Candle Return Visualizer")
-st.caption("Binance API를 이용한 커스텀 캔들 수익률 시각화")
+st.caption("OKX API를 이용한 커스텀 캔들 수익률 시각화")
 
 # Sidebar
 with st.sidebar:
@@ -128,12 +189,11 @@ with st.sidebar:
     st.markdown("---")
     st.header("설정")
 
-    ticker = st.text_input("Ticker (예: BTCUSDT)", value="BTCUSDT")
+    ticker = st.text_input("Ticker (예: BTC-USDT, ETH-USDT)", value="BTC-USDT")
     candle_days = st.slider("Custom Candle Size (일)", 1, 90, 14)
 
     st.markdown("---")
     st.subheader("날짜 범위")
-    st.caption("날짜 형식: YYYY-MM-DD")
 
     default_end = datetime.today()
     default_start = default_end - timedelta(days=90)
@@ -142,7 +202,7 @@ with st.sidebar:
     end_date = st.date_input("종료일", value=default_end)
 
 # Main content
-st.markdown("Use date format `YYYY-MM-DD`. Select a custom candle grouping and view return performance chart and table.")
+st.markdown("OKX에서 일봉 데이터를 가져와 커스텀 캔들 수익률을 계산합니다.")
 
 col1, col2 = st.columns([1, 4])
 with col1:
@@ -153,11 +213,11 @@ if generate_clicked:
         start = pd.to_datetime(start_date)
         end = pd.to_datetime(end_date)
     except Exception:
-        st.error("Invalid date format. Use YYYY-MM-DD.")
+        st.error("Invalid date format.")
         st.stop()
 
-    with st.spinner(f"Fetching {ticker.upper()} data from Binance..."):
-        df, err = get_binance_klines(ticker, start=start, end=end)
+    with st.spinner(f"Fetching {ticker.upper()} data from OKX..."):
+        df, err = get_okx_klines(ticker, start=start, end=end)
 
     if err:
         st.error(f"{err}")
