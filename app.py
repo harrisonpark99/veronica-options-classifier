@@ -87,7 +87,7 @@ def show_login_page():
         # Feature Overview
         st.markdown("### 제공 기능")
 
-        col_f1, col_f2 = st.columns(2)
+        col_f1, col_f2, col_f3 = st.columns(3)
 
         with col_f1:
             st.markdown(
@@ -108,6 +108,17 @@ def show_login_page():
                 - 거래일 종가 조회
                 - Qty * Month (USD) 계산
                 - 디버그 도구
+                """
+            )
+
+        with col_f3:
+            st.markdown(
+                """
+                **Custom Candle Returns**
+                - Binance 일봉 데이터
+                - 커스텀 캔들 수익률
+                - 기간별 차트 시각화
+                - 통계 요약 및 다운로드
                 """
             )
 
@@ -151,6 +162,7 @@ def show_dashboard():
         st.markdown("**페이지 바로가기**")
         st.page_link("pages/1_Option_Classifier.py", label="Option Classifier", icon="📊")
         st.page_link("pages/2_Xunke_Support.py", label="Xunke Support", icon="💹")
+        st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -158,7 +170,7 @@ def show_dashboard():
 
     st.markdown("---")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
 
     with col1:
         st.markdown("### 📊 Option Classifier")
@@ -191,6 +203,22 @@ def show_dashboard():
         )
         if st.button("Xunke Support 열기", key="open_xunke", use_container_width=True):
             st.switch_page("pages/2_Xunke_Support.py")
+
+    with col3:
+        st.markdown("### 📈 Custom Candle Returns")
+        st.markdown(
+            """
+            Binance API를 통해 커스텀 캔들 수익률을 시각화합니다.
+
+            **주요 기능:**
+            - 커스텀 캔들 사이즈 설정 (1~90일)
+            - 기간별 수익률 차트
+            - 통계 요약 (평균, 최대, 최소)
+            - CSV 다운로드
+            """
+        )
+        if st.button("Custom Candle Returns 열기", key="open_candle", use_container_width=True):
+            st.switch_page("pages/3_Custom_Candle_Returns.py")
 
     st.markdown("---")
 
