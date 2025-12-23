@@ -472,6 +472,30 @@ def calculate_date_ranges(latest_date: str) -> dict:
     }
 
 
+def get_table_snapshot(driver) -> str | None:
+    """
+    현재 테이블의 첫 번째 데이터 행 내용을 가져옴.
+    데이터 변경 감지용.
+    """
+    try:
+        snapshot = driver.execute_script(
+            r"""
+            const table = document.querySelector('table');
+            if (!table) return null;
+
+            // 첫 번째 데이터 행 (헤더 제외)
+            const rows = table.querySelectorAll('tbody tr');
+            if (rows.length === 0) return null;
+
+            // 첫 번째 행의 텍스트 내용
+            return rows[0].innerText;
+            """
+        )
+        return snapshot
+    except Exception:
+        return None
+
+
 def click_submit(driver):
     buttons = driver.find_elements(By.TAG_NAME, "button")
     for btn in buttons:
@@ -484,6 +508,55 @@ def click_submit(driver):
 def wait_for_table(driver, timeout=25):
     wait = WebDriverWait(driver, timeout)
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+
+
+def wait_for_data_refresh(driver, old_snapshot: str | None, timeout=30) -> bool:
+    """
+    테이블 데이터가 변경될 때까지 대기.
+
+    Args:
+        driver: Selenium driver
+        old_snapshot: Submit 전 테이블 스냅샷
+        timeout: 최대 대기 시간 (초)
+
+    Returns:
+        True if 데이터 변경됨, False if 타임아웃
+    """
+    print(f"  데이터 리프레시 대기 중 (최대 {timeout}초)...")
+
+    start_time = time.time()
+    check_count = 0
+
+    while time.time() - start_time < timeout:
+        check_count += 1
+        current_snapshot = get_table_snapshot(driver)
+
+        # 스냅샷이 변경되었는지 확인
+        if current_snapshot and current_snapshot != old_snapshot:
+            print(f"  ✅ 데이터 리프레시 완료! ({check_count}번 확인, {time.time() - start_time:.1f}초 소요)")
+            return True
+
+        # 로딩 중 표시 확인 (있다면)
+        try:
+            loading = driver.execute_script(
+                r"""
+                return !!(
+                    document.querySelector('.loading') ||
+                    document.querySelector('.spinner') ||
+                    document.querySelector('[class*="loading"]') ||
+                    document.querySelector('[class*="spinner"]')
+                );
+                """
+            )
+            if loading:
+                print(f"  ... 로딩 중 (확인 #{check_count})")
+        except Exception:
+            pass
+
+        time.sleep(0.5)
+
+    print(f"  ⚠️ 데이터 리프레시 타임아웃 ({timeout}초)")
+    return False
 
 
 def scrape_strategy_data(start_date, end_date, headless=False):
@@ -689,14 +762,30 @@ def scrape_with_date_detection(headless=False):
                 print("사용자에 의해 중단되었습니다.")
                 return None
 
-        print("\n[3단계] Submit 버튼 클릭...")
+        # Submit 전 테이블 스냅샷 저장 (데이터 변경 감지용)
+        print("\n[3단계] Submit 전 데이터 스냅샷 저장...")
+        old_snapshot = get_table_snapshot(driver)
+        if old_snapshot:
+            print(f"  현재 데이터 첫 행: {old_snapshot[:50]}...")
+
+        print("\n[4단계] Submit 버튼 클릭...")
         click_submit(driver)
 
-        print("[4단계] 데이터 로딩 대기 중...")
+        print("\n[5단계] 데이터 리프레시 대기 중...")
+        # 테이블이 존재하는지 먼저 확인
         wait_for_table(driver, timeout=30)
-        time.sleep(2)
 
-        print("\n[5단계] 테이블 데이터 추출 중...")
+        # 데이터가 실제로 변경될 때까지 대기
+        data_refreshed = wait_for_data_refresh(driver, old_snapshot, timeout=30)
+
+        if not data_refreshed:
+            print("⚠️ 경고: 데이터 리프레시가 감지되지 않았습니다.")
+            print("그래도 계속 진행합니다...")
+
+        # 추가 안정화 대기
+        time.sleep(1)
+
+        print("\n[6단계] 테이블 데이터 추출 중...")
         df_list = pd.read_html(driver.page_source)
 
         if df_list:
