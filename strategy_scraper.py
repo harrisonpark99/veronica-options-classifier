@@ -510,6 +510,201 @@ def wait_for_table(driver, timeout=25):
     wait.until(EC.presence_of_element_located((By.TAG_NAME, "table")))
 
 
+def get_current_page_table(driver) -> pd.DataFrame | None:
+    """현재 페이지의 테이블 데이터를 DataFrame으로 반환"""
+    try:
+        df_list = pd.read_html(driver.page_source)
+        if df_list:
+            return max(df_list, key=lambda x: len(x))
+        return None
+    except Exception:
+        return None
+
+
+def get_pagination_info(driver) -> dict:
+    """
+    페이지네이션 정보 확인.
+
+    Returns:
+        {
+            'has_next': bool,      # 다음 페이지 있는지
+            'has_prev': bool,      # 이전 페이지 있는지
+            'current_page': int,   # 현재 페이지 번호
+            'total_pages': int,    # 총 페이지 수 (알 수 있다면)
+        }
+    """
+    try:
+        info = driver.execute_script(
+            r"""
+            // 다양한 페이지네이션 패턴 탐색
+
+            // 패턴 1: "Next" 버튼
+            const nextBtn = document.querySelector(
+                'button:not([disabled])[aria-label*="next" i], ' +
+                'button:not([disabled])[aria-label*="Next" i], ' +
+                'a[aria-label*="next" i], ' +
+                'button:not([disabled]) svg[class*="chevron-right"], ' +
+                '[class*="pagination"] button:not([disabled]):last-child, ' +
+                '[class*="pagination"] li:last-child:not(.disabled) a, ' +
+                'button:not([disabled])[class*="next" i]'
+            );
+
+            // 패턴 2: "Prev" 버튼
+            const prevBtn = document.querySelector(
+                'button:not([disabled])[aria-label*="prev" i], ' +
+                'button:not([disabled])[aria-label*="Prev" i], ' +
+                'a[aria-label*="prev" i], ' +
+                'button:not([disabled])[class*="prev" i]'
+            );
+
+            // 패턴 3: 페이지 번호 텍스트 (예: "1 of 5", "Page 1/5")
+            const pageText = document.body.innerText.match(/(?:page\s*)?(\d+)\s*(?:of|\/)\s*(\d+)/i);
+            let currentPage = 1;
+            let totalPages = 1;
+
+            if (pageText) {
+                currentPage = parseInt(pageText[1]);
+                totalPages = parseInt(pageText[2]);
+            }
+
+            // 패턴 4: 활성 페이지 번호 버튼
+            const activePageBtn = document.querySelector(
+                '[class*="pagination"] [class*="active"], ' +
+                '[class*="pagination"] button[aria-current="page"], ' +
+                '[class*="pagination"] .selected'
+            );
+            if (activePageBtn) {
+                const num = parseInt(activePageBtn.innerText);
+                if (!isNaN(num)) currentPage = num;
+            }
+
+            return {
+                has_next: !!nextBtn,
+                has_prev: !!prevBtn,
+                current_page: currentPage,
+                total_pages: totalPages
+            };
+            """
+        )
+        return info
+    except Exception:
+        return {'has_next': False, 'has_prev': False, 'current_page': 1, 'total_pages': 1}
+
+
+def click_next_page(driver) -> bool:
+    """
+    다음 페이지 버튼 클릭.
+
+    Returns:
+        True if 클릭 성공, False if 다음 페이지 없음
+    """
+    try:
+        clicked = driver.execute_script(
+            r"""
+            // 다양한 "다음" 버튼 패턴 시도
+            const selectors = [
+                'button:not([disabled])[aria-label*="next" i]',
+                'button:not([disabled])[aria-label*="Next" i]',
+                'a[aria-label*="next" i]:not([disabled])',
+                '[class*="pagination"] button:not([disabled]):last-child',
+                '[class*="pagination"] li:last-child:not(.disabled) a',
+                'button:not([disabled])[class*="next" i]',
+                '[class*="next"]:not([disabled])',
+                'button:has(svg[class*="chevron-right"])',
+                '[aria-label="Go to next page"]',
+            ];
+
+            for (const sel of selectors) {
+                const btn = document.querySelector(sel);
+                if (btn && !btn.disabled) {
+                    btn.click();
+                    return true;
+                }
+            }
+
+            // 패턴: ">" 또는 "»" 텍스트가 있는 버튼
+            const buttons = document.querySelectorAll('button, a');
+            for (const btn of buttons) {
+                const text = btn.innerText.trim();
+                if ((text === '>' || text === '»' || text === '→' || text.toLowerCase() === 'next') && !btn.disabled) {
+                    btn.click();
+                    return true;
+                }
+            }
+
+            return false;
+            """
+        )
+        return clicked
+    except Exception:
+        return False
+
+
+def scrape_all_pages(driver, timeout_per_page=10) -> pd.DataFrame:
+    """
+    모든 페이지를 순회하며 테이블 데이터 수집.
+
+    Returns:
+        모든 페이지 데이터가 합쳐진 DataFrame
+    """
+    all_data = []
+    page_num = 1
+
+    while True:
+        print(f"\n  📄 페이지 {page_num} 스크래핑 중...")
+
+        # 현재 페이지 데이터 수집
+        df = get_current_page_table(driver)
+        if df is not None and len(df) > 0:
+            # 첫 페이지가 아니면 헤더 행 제거 (중복 방지)
+            if page_num > 1 and len(all_data) > 0:
+                # 헤더가 데이터로 들어왔을 수 있으니 첫 행 확인
+                first_row = df.iloc[0].astype(str).tolist()
+                if all_data and first_row == all_data[0].columns.tolist():
+                    df = df.iloc[1:]
+
+            all_data.append(df)
+            print(f"     ✅ {len(df)}개 행 수집")
+        else:
+            print(f"     ⚠️ 데이터 없음")
+
+        # 페이지네이션 정보 확인
+        page_info = get_pagination_info(driver)
+        print(f"     페이지 정보: {page_info}")
+
+        # 다음 페이지가 없으면 종료
+        if not page_info['has_next']:
+            print(f"\n  📋 마지막 페이지 도달 (총 {page_num} 페이지)")
+            break
+
+        # 다음 페이지로 이동
+        old_snapshot = get_table_snapshot(driver)
+
+        if not click_next_page(driver):
+            print(f"\n  ⚠️ 다음 페이지 버튼 클릭 실패")
+            break
+
+        # 페이지 전환 대기 (데이터 변경 감지)
+        page_changed = wait_for_data_refresh(driver, old_snapshot, timeout=timeout_per_page)
+        if not page_changed:
+            print(f"  ⚠️ 페이지 전환 감지 실패, 계속 진행...")
+
+        page_num += 1
+
+        # 무한 루프 방지
+        if page_num > 100:
+            print("  ⚠️ 최대 페이지 수(100) 도달, 중단")
+            break
+
+    # 모든 데이터 합치기
+    if all_data:
+        combined_df = pd.concat(all_data, ignore_index=True)
+        print(f"\n  📊 총 {len(combined_df)}개 행 수집 완료 ({page_num} 페이지)")
+        return combined_df
+
+    return pd.DataFrame()
+
+
 def wait_for_data_refresh(driver, old_snapshot: str | None, timeout=30) -> bool:
     """
     테이블 데이터가 변경될 때까지 대기.
@@ -785,12 +980,13 @@ def scrape_with_date_detection(headless=False):
         # 추가 안정화 대기
         time.sleep(1)
 
-        print("\n[6단계] 테이블 데이터 추출 중...")
-        df_list = pd.read_html(driver.page_source)
+        print("\n[6단계] 모든 페이지 테이블 데이터 추출 중...")
 
-        if df_list:
-            df = max(df_list, key=lambda x: len(x))
-            print(f"✅ 데이터 추출 성공: {len(df)}개 행, {len(df.columns)}개 열")
+        # 모든 페이지 스크래핑
+        df = scrape_all_pages(driver, timeout_per_page=15)
+
+        if df is not None and len(df) > 0:
+            print(f"\n✅ 전체 데이터 추출 성공: {len(df)}개 행, {len(df.columns)}개 열")
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"strategy_data_{timestamp}.xlsx"
