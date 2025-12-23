@@ -383,6 +383,95 @@ def print_date_summary(result: dict):
     return start_match and end_match
 
 
+def get_latest_available_date(driver, timeout=10) -> str | None:
+    """
+    웹사이트에서 선택 가능한 최신 날짜를 찾아서 반환.
+
+    방법:
+    1. End date input의 현재 값 확인 (보통 최신 날짜가 기본값)
+    2. 또는 date picker에서 활성화된 최신 날짜 찾기
+
+    Returns:
+        'YYYY-MM-DD' 형식의 날짜 문자열, 못 찾으면 None
+    """
+    selectors = [
+        'input[data-range="end"]',
+        'input[placeholder="End date"]',
+        'input[placeholder*="End"]',
+        'input[data-range="start"]',
+        '#timeRange',
+    ]
+
+    for sel in selectors:
+        try:
+            value = driver.execute_script(
+                r"""
+                const el = document.querySelector(arguments[0]);
+                if (!el) return null;
+                return el.value;
+                """,
+                sel,
+            )
+            if value and len(value) >= 10:
+                # YYYY-MM-DD 형식인지 간단히 확인
+                if '-' in value or '/' in value:
+                    # 형식 통일 (YYYY/MM/DD -> YYYY-MM-DD)
+                    normalized = value.replace('/', '-')[:10]
+                    print(f"[INFO] 최신 가용 날짜 감지: {normalized} (from {sel})")
+                    return normalized
+        except Exception:
+            continue
+
+    return None
+
+
+def calculate_date_ranges(latest_date: str) -> dict:
+    """
+    최신 날짜 기준으로 DTD, MTD, YTD 날짜 범위 계산.
+
+    Args:
+        latest_date: 'YYYY-MM-DD' 형식
+
+    Returns:
+        {
+            'DTD': {'start': '...', 'end': '...', 'label': '...'},
+            'MTD': {'start': '...', 'end': '...', 'label': '...'},
+            'YTD': {'start': '...', 'end': '...', 'label': '...'},
+        }
+    """
+    latest = datetime.strptime(latest_date, "%Y-%m-%d")
+
+    # DTD: 최신 날짜 하루만
+    dtd_start = latest_date
+    dtd_end = latest_date
+
+    # MTD: 이번 달 1일 ~ 최신 날짜
+    mtd_start = latest.replace(day=1).strftime("%Y-%m-%d")
+    mtd_end = latest_date
+
+    # YTD: 올해 1월 1일 ~ 최신 날짜
+    ytd_start = latest.replace(month=1, day=1).strftime("%Y-%m-%d")
+    ytd_end = latest_date
+
+    return {
+        'DTD': {
+            'start': dtd_start,
+            'end': dtd_end,
+            'label': f"DTD (당일: {dtd_start})"
+        },
+        'MTD': {
+            'start': mtd_start,
+            'end': mtd_end,
+            'label': f"MTD (월초~현재: {mtd_start} ~ {mtd_end})"
+        },
+        'YTD': {
+            'start': ytd_start,
+            'end': ytd_end,
+            'label': f"YTD (연초~현재: {ytd_start} ~ {ytd_end})"
+        },
+    }
+
+
 def click_submit(driver):
     buttons = driver.find_elements(By.TAG_NAME, "button")
     for btn in buttons:
@@ -507,29 +596,155 @@ def scrape_strategy_data(start_date, end_date, headless=False):
         driver.quit()
 
 
+def scrape_with_date_detection(headless=False):
+    """
+    1. 먼저 웹사이트 접속해서 최신 가용 날짜 감지
+    2. DTD/MTD/YTD 옵션 제시
+    3. 사용자 선택에 따라 스크래핑
+    """
+    print("=" * 60)
+    print("전략 데이터 스크래퍼 v2.4 (DTD/MTD/YTD)")
+    print("=" * 60)
+
+    # === 1단계: 브라우저 열고 최신 날짜 감지 ===
+    print("\n[1단계] 웹사이트 접속하여 최신 가용 날짜 확인 중...")
+
+    options = webdriver.ChromeOptions()
+    if headless:
+        options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--ignore-certificate-errors")
+    options.add_argument("--ignore-ssl-errors")
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"ChromeDriverManager 자동 설치 실패: {e}")
+        driver = webdriver.Chrome(options=options)
+
+    driver.set_window_size(1400, 900)
+
+    try:
+        driver.get(BASE_URL)
+        time.sleep(2)
+
+        # 로그인 필요하면 대기
+        if is_login_like_page(driver) or (BASE_URL not in driver.current_url):
+            wait_for_user_login(driver, timeout=180)
+
+        # 페이지 로딩 대기
+        time.sleep(3)
+
+        # 최신 날짜 감지
+        latest_date = get_latest_available_date(driver)
+
+        if not latest_date:
+            print("⚠️ 최신 날짜를 자동 감지하지 못했습니다.")
+            latest_date = input("최신 날짜를 직접 입력하세요 (YYYY-MM-DD): ").strip()
+
+        # === 2단계: DTD/MTD/YTD 옵션 제시 ===
+        date_ranges = calculate_date_ranges(latest_date)
+
+        print("\n" + "=" * 60)
+        print(f"📅 최신 가용 날짜: {latest_date}")
+        print("=" * 60)
+
+        print("\n조회 기간 선택:")
+        print(f"  1. {date_ranges['DTD']['label']}")
+        print(f"  2. {date_ranges['MTD']['label']}")
+        print(f"  3. {date_ranges['YTD']['label']}")
+        print("  4. 날짜 직접 입력")
+
+        choice = input("\n선택 (1-4): ").strip()
+
+        if choice == "1":
+            start_date = date_ranges['DTD']['start']
+            end_date = date_ranges['DTD']['end']
+        elif choice == "2":
+            start_date = date_ranges['MTD']['start']
+            end_date = date_ranges['MTD']['end']
+        elif choice == "3":
+            start_date = date_ranges['YTD']['start']
+            end_date = date_ranges['YTD']['end']
+        else:
+            start_date = input("시작 날짜 (YYYY-MM-DD): ").strip()
+            end_date = input("종료 날짜 (YYYY-MM-DD): ").strip()
+
+        print(f"\n선택된 기간: {start_date} ~ {end_date}")
+
+        # === 3단계: 날짜 입력 및 스크래핑 ===
+        print(f"\n[2단계] 날짜 입력 중...")
+
+        date_result = set_time_range_robust(driver, start_date, end_date, timeout=25)
+        dates_ok = print_date_summary(date_result)
+
+        if not dates_ok:
+            print("⚠️ 경고: 날짜가 정확히 입력되지 않았습니다!")
+            print("계속 진행하시겠습니까? (Enter=계속 / Ctrl+C=중단)")
+            try:
+                input()
+            except KeyboardInterrupt:
+                print("사용자에 의해 중단되었습니다.")
+                return None
+
+        print("\n[3단계] Submit 버튼 클릭...")
+        click_submit(driver)
+
+        print("[4단계] 데이터 로딩 대기 중...")
+        wait_for_table(driver, timeout=30)
+        time.sleep(2)
+
+        print("\n[5단계] 테이블 데이터 추출 중...")
+        df_list = pd.read_html(driver.page_source)
+
+        if df_list:
+            df = max(df_list, key=lambda x: len(x))
+            print(f"✅ 데이터 추출 성공: {len(df)}개 행, {len(df.columns)}개 열")
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"strategy_data_{timestamp}.xlsx"
+            df.to_excel(filename, index=False)
+            print(f"📁 파일 저장 완료: {filename}")
+
+            # 최종 요약
+            print("\n" + "=" * 60)
+            print("📊 최종 결과")
+            print("=" * 60)
+            print(f"  최신 가용 날짜: {latest_date}")
+            print(f"  요청 기간: {start_date} ~ {end_date}")
+            print(f"  실제 기간: {date_result['start_actual']} ~ {date_result['end_actual']}")
+            print(f"  수집 행수: {len(df)}개")
+            print(f"  저장 파일: {filename}")
+            print("=" * 60)
+
+            return df
+
+        print("테이블 파싱 결과가 비어 있습니다.")
+        return None
+
+    except Exception as e:
+        print(f"오류 발생: {e}")
+        try:
+            screenshot_name = f"error_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            driver.save_screenshot(screenshot_name)
+            print(f"📸 에러 스크린샷 저장: {screenshot_name}")
+        except Exception:
+            pass
+        return None
+
+    finally:
+        print("\n브라우저를 닫으려면 Enter를 누르세요...")
+        try:
+            input()
+        except Exception:
+            pass
+        driver.quit()
+
+
 if __name__ == "__main__":
-    print("=" * 60)
-    print("전략 데이터 스크래퍼 v2.3 (날짜 검증 기능 추가)")
-    print("=" * 60)
-
-    print("\n옵션:")
-    print("1. 오늘")
-    print("2. 최근 7일")
-    print("3. 날짜 직접 입력")
-
-    choice = input("\n선택 (1-3): ").strip()
-    today = datetime.now()
-
-    if choice == "1":
-        start_date = end_date = today.strftime("%Y-%m-%d")
-    elif choice == "2":
-        start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
-        end_date = today.strftime("%Y-%m-%d")
-    else:
-        start_date = input("시작 날짜 (YYYY-MM-DD): ").strip()
-        end_date = input("종료 날짜 (YYYY-MM-DD): ").strip()
-
-    result = scrape_strategy_data(start_date, end_date, headless=False)
+    result = scrape_with_date_detection(headless=False)
 
     if result is not None:
         print("\n=== 결과 요약 ===")
