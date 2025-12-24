@@ -497,33 +497,25 @@ def get_table_snapshot(driver) -> str | None:
 
 
 def click_submit(driver):
-    """Submit 버튼 클릭"""
+    """Submit 버튼 클릭 (Selenium 직접 클릭)"""
     print("  🔘 Submit 버튼 찾는 중...")
 
-    clicked = driver.execute_script(
-        r"""
-        // xkmgmt-btn + type="submit" 으로 정확히 찾기
-        const submitBtn = document.querySelector('button[type="submit"].xkmgmt-btn');
-        if (submitBtn) {
-            submitBtn.click();
-            return 'xkmgmt_submit';
-        }
-
-        // fallback: type="submit"만으로 찾기
-        const fallbackBtn = document.querySelector('button[type="submit"]');
-        if (fallbackBtn) {
-            fallbackBtn.click();
-            return 'type_submit';
-        }
-
-        return 'not_found';
-        """
-    )
-
-    if clicked == 'not_found':
-        raise Exception("Submit 버튼을 찾지 못했습니다.")
-
-    print(f"  ✅ Submit 버튼 클릭 완료 ({clicked})")
+    try:
+        # Selenium으로 직접 찾아서 클릭 (더 안정적)
+        wait = WebDriverWait(driver, 10)
+        submit_btn = wait.until(
+            EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"].xkmgmt-btn'))
+        )
+        submit_btn.click()
+        print("  ✅ Submit 버튼 클릭 완료 (selenium_click)")
+    except Exception:
+        # fallback: type="submit"만으로 찾기
+        try:
+            submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+            submit_btn.click()
+            print("  ✅ Submit 버튼 클릭 완료 (fallback_click)")
+        except Exception:
+            raise Exception("Submit 버튼을 찾지 못했습니다.")
 
 
 def wait_for_table(driver, timeout=25):
@@ -1099,6 +1091,10 @@ def scrape_with_date_detection(headless=False):
 
         if not dates_ok:
             print("⚠️ 경고: 날짜가 정확히 입력되지 않았습니다. 계속 진행...")
+
+        # 날짜 입력 후 React 상태 반영 대기
+        print("  날짜 입력 완료, 2초 대기...")
+        time.sleep(2)
 
         # Submit 전 테이블 스냅샷 저장 (데이터 변경 감지용)
         print("\n[3단계] Submit 전 데이터 스냅샷 저장...")
