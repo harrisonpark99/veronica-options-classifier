@@ -532,11 +532,26 @@ def wait_for_table(driver, timeout=25):
 
 
 def get_current_page_table(driver) -> pd.DataFrame | None:
-    """현재 페이지의 테이블 데이터를 DataFrame으로 반환"""
+    """현재 페이지의 테이블 데이터를 DataFrame으로 반환 (캘린더 제외)"""
     try:
-        df_list = pd.read_html(driver.page_source)
-        if df_list:
-            return max(df_list, key=lambda x: len(x))
+        from io import StringIO
+        df_list = pd.read_html(StringIO(driver.page_source))
+        if not df_list:
+            return None
+
+        # 캘린더 테이블 제외 (Week, Mo, Tu 등의 컬럼이 있으면 캘린더)
+        calendar_columns = {'Week', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'}
+        valid_tables = []
+
+        for df in df_list:
+            # 컬럼명에 캘린더 관련 키워드가 있으면 제외
+            col_set = set(str(c) for c in df.columns)
+            if not calendar_columns.intersection(col_set):
+                valid_tables.append(df)
+
+        if valid_tables:
+            # 가장 큰 테이블 반환
+            return max(valid_tables, key=lambda x: len(x))
         return None
     except Exception:
         return None
