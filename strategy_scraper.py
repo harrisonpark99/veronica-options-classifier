@@ -688,79 +688,52 @@ def set_page_size(driver, size=50) -> bool:
     print(f"  📋 페이지 사이즈 {size}개로 변경 중...")
 
     try:
-        result = driver.execute_script(
+        # 1단계: 드롭다운 셀렉터 클릭해서 열기
+        clicked = driver.execute_script(
             r"""
-            const targetSize = arguments[0];
-
-            // 방법 1: xkmgmt 페이지 사이즈 셀렉터 찾기
-            const sizeChanger = document.querySelector('.xkmgmt-pagination-options-size-changer') ||
-                               document.querySelector('[class*="pagination-options"]') ||
-                               document.querySelector('[class*="page-size"]') ||
-                               document.querySelector('[class*="size-changer"]');
-
+            // xkmgmt-pagination-options-size-changer 클래스로 찾기
+            const sizeChanger = document.querySelector('.xkmgmt-pagination-options-size-changer');
             if (sizeChanger) {
                 sizeChanger.click();
-                return 'clicked_changer';
+                return true;
             }
-
-            // 방법 2: "10 / page" 텍스트가 있는 요소 찾기
-            const allElements = document.querySelectorAll('div, span, button, select');
-            for (const el of allElements) {
-                const text = el.innerText.trim();
-                if (text.match(/\d+\s*\/\s*page/i) || text.match(/\d+\s*items?\s*per\s*page/i)) {
-                    el.click();
-                    return 'clicked_text';
-                }
-            }
-
-            // 방법 3: select 요소 직접 찾기
-            const selects = document.querySelectorAll('select');
-            for (const sel of selects) {
-                const options = sel.querySelectorAll('option');
-                for (const opt of options) {
-                    if (opt.value == targetSize || opt.innerText.includes(targetSize)) {
-                        sel.value = opt.value;
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return 'select_changed';
-                    }
-                }
-            }
-
-            return 'not_found';
-            """,
-            size
+            return false;
+            """
         )
 
-        if result == 'not_found':
+        if not clicked:
             print(f"  ⚠️ 페이지 사이즈 변경 UI를 찾지 못함")
             return False
 
-        # 드롭다운이 열렸으면 옵션 선택
-        import time
+        # 드롭다운 열리는 시간 대기
         time.sleep(0.5)
 
+        # 2단계: 드롭다운에서 원하는 사이즈 옵션 클릭
         option_clicked = driver.execute_script(
             r"""
             const targetSize = arguments[0];
 
-            // 드롭다운 옵션에서 원하는 사이즈 찾기
-            const options = document.querySelectorAll(
-                '.xkmgmt-select-item, ' +
-                '[class*="select-item"], ' +
-                '[class*="dropdown-item"], ' +
-                '[class*="option"], ' +
-                'li[role="option"], ' +
-                '.ant-select-item'
-            );
+            // xkmgmt-select-dropdown에서 옵션 찾기
+            const dropdown = document.querySelector('.xkmgmt-select-dropdown:not(.xkmgmt-select-dropdown-hidden)');
+            if (!dropdown) {
+                // 드롭다운이 아직 안 열렸으면 전체에서 찾기
+                const allOptions = document.querySelectorAll('.xkmgmt-select-item');
+                for (const opt of allOptions) {
+                    const text = opt.innerText.trim();
+                    if (text.includes(targetSize.toString()) && text.includes('page')) {
+                        opt.click();
+                        return true;
+                    }
+                }
+                return false;
+            }
 
+            // 드롭다운 안의 옵션들 찾기
+            const options = dropdown.querySelectorAll('.xkmgmt-select-item, [class*="select-item"]');
             for (const opt of options) {
                 const text = opt.innerText.trim();
-                if (text.includes(targetSize.toString()) && text.match(/page/i)) {
-                    opt.click();
-                    return true;
-                }
-                // "50" 만 있는 경우
-                if (text === targetSize.toString()) {
+                // "50 / page" 형식 매칭
+                if (text.includes(targetSize.toString()) && text.includes('page')) {
                     opt.click();
                     return true;
                 }
