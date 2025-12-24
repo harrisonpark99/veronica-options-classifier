@@ -497,25 +497,41 @@ def get_table_snapshot(driver) -> str | None:
 
 
 def click_submit(driver):
-    """Submit 버튼 클릭 (Selenium 직접 클릭)"""
+    """Submit 버튼 클릭 (ActionChains 사용)"""
+    from selenium.webdriver.common.action_chains import ActionChains
+
     print("  🔘 Submit 버튼 찾는 중...")
 
     try:
-        # Selenium으로 직접 찾아서 클릭 (더 안정적)
         wait = WebDriverWait(driver, 10)
         submit_btn = wait.until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, 'button[type="submit"].xkmgmt-btn'))
+            EC.presence_of_element_located((By.CSS_SELECTOR, 'button[type="submit"].xkmgmt-btn'))
         )
-        submit_btn.click()
-        print("  ✅ Submit 버튼 클릭 완료 (selenium_click)")
-    except Exception:
-        # fallback: type="submit"만으로 찾기
-        try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
-            submit_btn.click()
-            print("  ✅ Submit 버튼 클릭 완료 (fallback_click)")
-        except Exception:
-            raise Exception("Submit 버튼을 찾지 못했습니다.")
+
+        # 버튼이 화면에 보이도록 스크롤
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
+        time.sleep(0.5)
+
+        # ActionChains로 실제 마우스 클릭처럼 동작
+        actions = ActionChains(driver)
+        actions.move_to_element(submit_btn)
+        actions.click()
+        actions.perform()
+
+        print("  ✅ Submit 버튼 클릭 완료 (action_chains)")
+    except Exception as e:
+        print(f"  ⚠️ ActionChains 실패: {e}, JavaScript 클릭 시도...")
+        # fallback: JavaScript로 강제 클릭
+        driver.execute_script(
+            """
+            const btn = document.querySelector('button[type="submit"]');
+            if (btn) {
+                btn.focus();
+                btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+            }
+            """
+        )
+        print("  ✅ Submit 버튼 클릭 완료 (js_dispatch)")
 
 
 def wait_for_table(driver, timeout=25):
