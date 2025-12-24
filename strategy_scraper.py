@@ -533,6 +533,7 @@ def get_pagination_info(driver) -> dict:
             'total_pages': int,    # 총 페이지 수 (알 수 있다면)
             'total_items': int,    # 총 아이템 수
             'current_range': str,  # 현재 범위 (예: "61-70")
+            'range_end': int,      # 현재 범위 끝 번호
         }
     """
     try:
@@ -544,18 +545,29 @@ def get_pagination_info(driver) -> dict:
                 current_page: 1,
                 total_pages: 1,
                 total_items: 0,
-                current_range: ''
+                current_range: '',
+                range_end: 0
             };
 
-            // "61-70 of 72 items" 패턴 찾기
+            // "1-10 of 71 items" 패턴 찾기
             const itemsText = document.body.innerText.match(/(\d+)-(\d+)\s+of\s+(\d+)\s*items?/i);
             if (itemsText) {
                 result.current_range = itemsText[1] + '-' + itemsText[2];
+                result.range_end = parseInt(itemsText[2]);
                 result.total_items = parseInt(itemsText[3]);
+
+                // 현재 범위 끝 번호가 총 아이템 수보다 작으면 다음 페이지 있음
+                if (result.range_end < result.total_items) {
+                    result.has_next = true;
+                }
+                // 현재 범위 시작이 1보다 크면 이전 페이지 있음
+                if (parseInt(itemsText[1]) > 1) {
+                    result.has_prev = true;
+                }
             }
 
-            // ">" 버튼 찾기 (다음 페이지)
-            const allButtons = document.querySelectorAll('button, a, li');
+            // ">" 버튼 찾기 (다음 페이지) - 추가 확인
+            const allButtons = document.querySelectorAll('button, a, li, span');
             for (const btn of allButtons) {
                 const text = btn.innerText.trim();
                 // ">" 버튼이고 비활성화가 아닌 경우
@@ -581,19 +593,22 @@ def get_pagination_info(driver) -> dict:
             }
 
             // 현재 활성화된 페이지 번호 찾기 (보통 강조 표시됨)
-            const pageButtons = document.querySelectorAll('button, a, li');
+            const pageButtons = document.querySelectorAll('button, a, li, span');
             for (const btn of pageButtons) {
                 const text = btn.innerText.trim();
                 // 숫자인 경우
                 if (/^\d+$/.test(text)) {
                     // 활성화된 페이지인지 확인 (배경색, 강조 등)
+                    const style = getComputedStyle(btn);
                     const isActive = btn.classList.contains('active') ||
                                     btn.classList.contains('selected') ||
                                     btn.classList.contains('current') ||
                                     btn.getAttribute('aria-current') === 'page' ||
                                     btn.parentElement?.classList.contains('active') ||
-                                    getComputedStyle(btn).backgroundColor.includes('59, 130, 246') || // blue
-                                    getComputedStyle(btn).backgroundColor.includes('rgb(59');
+                                    style.backgroundColor.includes('59, 130, 246') ||
+                                    style.backgroundColor.includes('rgb(59') ||
+                                    style.borderColor.includes('59, 130, 246') ||
+                                    btn.style.backgroundColor !== '';
                     if (isActive) {
                         result.current_page = parseInt(text);
                     }
@@ -610,7 +625,7 @@ def get_pagination_info(driver) -> dict:
         )
         return info
     except Exception:
-        return {'has_next': False, 'has_prev': False, 'current_page': 1, 'total_pages': 1, 'total_items': 0, 'current_range': ''}
+        return {'has_next': False, 'has_prev': False, 'current_page': 1, 'total_pages': 1, 'total_items': 0, 'current_range': '', 'range_end': 0}
 
 
 def click_next_page(driver) -> bool:
