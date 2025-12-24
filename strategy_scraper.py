@@ -652,22 +652,7 @@ def click_next_page(driver) -> bool:
                 return true;
             }
 
-            // 방법 3: ">" 텍스트로 찾기 (fallback)
-            const allElements = document.querySelectorAll('button, a, li, span');
-            for (const el of allElements) {
-                const text = el.innerText.trim();
-                if (text === '>' || text === '›' || text === '»' || text === '→') {
-                    const isDisabled = el.disabled ||
-                                      el.classList.contains('disabled') ||
-                                      el.getAttribute('aria-disabled') === 'true';
-                    if (!isDisabled) {
-                        el.click();
-                        return true;
-                    }
-                }
-            }
-
-            // 방법 4: aria-label 기반 찾기
+            // 방법 3: aria-label 기반 찾기
             const ariaSelectors = [
                 '[aria-label*="next" i]:not([aria-disabled="true"])',
                 '[aria-label*="Next" i]:not([aria-disabled="true"])',
