@@ -500,34 +500,20 @@ def click_submit(driver):
     """Submit 버튼 클릭"""
     print("  🔘 Submit 버튼 찾는 중...")
 
-    # JavaScript로 더 유연하게 찾기
     clicked = driver.execute_script(
         r"""
-        // 방법 1: 텍스트가 "Submit"인 버튼 찾기
-        const buttons = document.querySelectorAll('button');
-        for (const btn of buttons) {
-            const text = btn.innerText.trim().toLowerCase();
-            if (text === 'submit' || text === '조회' || text === '검색') {
-                btn.click();
-                console.log('Submit clicked via text match');
-                return 'text_match';
-            }
-        }
-
-        // 방법 2: type="submit" 속성
-        const submitBtn = document.querySelector('button[type="submit"]');
+        // xkmgmt-btn + type="submit" 으로 정확히 찾기
+        const submitBtn = document.querySelector('button[type="submit"].xkmgmt-btn');
         if (submitBtn) {
             submitBtn.click();
-            console.log('Submit clicked via type=submit');
-            return 'type_submit';
+            return 'xkmgmt_submit';
         }
 
-        // 방법 3: class나 id에 submit 포함
-        const byClass = document.querySelector('[class*="submit" i], [id*="submit" i]');
-        if (byClass) {
-            byClass.click();
-            console.log('Submit clicked via class/id');
-            return 'class_id';
+        // fallback: type="submit"만으로 찾기
+        const fallbackBtn = document.querySelector('button[type="submit"]');
+        if (fallbackBtn) {
+            fallbackBtn.click();
+            return 'type_submit';
         }
 
         return 'not_found';
