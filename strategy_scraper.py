@@ -531,64 +531,86 @@ def get_pagination_info(driver) -> dict:
             'has_prev': bool,      # 이전 페이지 있는지
             'current_page': int,   # 현재 페이지 번호
             'total_pages': int,    # 총 페이지 수 (알 수 있다면)
+            'total_items': int,    # 총 아이템 수
+            'current_range': str,  # 현재 범위 (예: "61-70")
         }
     """
     try:
         info = driver.execute_script(
             r"""
-            // 다양한 페이지네이션 패턴 탐색
-
-            // 패턴 1: "Next" 버튼
-            const nextBtn = document.querySelector(
-                'button:not([disabled])[aria-label*="next" i], ' +
-                'button:not([disabled])[aria-label*="Next" i], ' +
-                'a[aria-label*="next" i], ' +
-                'button:not([disabled]) svg[class*="chevron-right"], ' +
-                '[class*="pagination"] button:not([disabled]):last-child, ' +
-                '[class*="pagination"] li:last-child:not(.disabled) a, ' +
-                'button:not([disabled])[class*="next" i]'
-            );
-
-            // 패턴 2: "Prev" 버튼
-            const prevBtn = document.querySelector(
-                'button:not([disabled])[aria-label*="prev" i], ' +
-                'button:not([disabled])[aria-label*="Prev" i], ' +
-                'a[aria-label*="prev" i], ' +
-                'button:not([disabled])[class*="prev" i]'
-            );
-
-            // 패턴 3: 페이지 번호 텍스트 (예: "1 of 5", "Page 1/5")
-            const pageText = document.body.innerText.match(/(?:page\s*)?(\d+)\s*(?:of|\/)\s*(\d+)/i);
-            let currentPage = 1;
-            let totalPages = 1;
-
-            if (pageText) {
-                currentPage = parseInt(pageText[1]);
-                totalPages = parseInt(pageText[2]);
-            }
-
-            // 패턴 4: 활성 페이지 번호 버튼
-            const activePageBtn = document.querySelector(
-                '[class*="pagination"] [class*="active"], ' +
-                '[class*="pagination"] button[aria-current="page"], ' +
-                '[class*="pagination"] .selected'
-            );
-            if (activePageBtn) {
-                const num = parseInt(activePageBtn.innerText);
-                if (!isNaN(num)) currentPage = num;
-            }
-
-            return {
-                has_next: !!nextBtn,
-                has_prev: !!prevBtn,
-                current_page: currentPage,
-                total_pages: totalPages
+            let result = {
+                has_next: false,
+                has_prev: false,
+                current_page: 1,
+                total_pages: 1,
+                total_items: 0,
+                current_range: ''
             };
+
+            // "61-70 of 72 items" 패턴 찾기
+            const itemsText = document.body.innerText.match(/(\d+)-(\d+)\s+of\s+(\d+)\s*items?/i);
+            if (itemsText) {
+                result.current_range = itemsText[1] + '-' + itemsText[2];
+                result.total_items = parseInt(itemsText[3]);
+            }
+
+            // ">" 버튼 찾기 (다음 페이지)
+            const allButtons = document.querySelectorAll('button, a, li');
+            for (const btn of allButtons) {
+                const text = btn.innerText.trim();
+                // ">" 버튼이고 비활성화가 아닌 경우
+                if (text === '>' || text === '›' || text === '»') {
+                    const isDisabled = btn.disabled ||
+                                      btn.classList.contains('disabled') ||
+                                      btn.getAttribute('aria-disabled') === 'true' ||
+                                      btn.parentElement?.classList.contains('disabled');
+                    if (!isDisabled) {
+                        result.has_next = true;
+                    }
+                }
+                // "<" 버튼 (이전 페이지)
+                if (text === '<' || text === '‹' || text === '«') {
+                    const isDisabled = btn.disabled ||
+                                      btn.classList.contains('disabled') ||
+                                      btn.getAttribute('aria-disabled') === 'true' ||
+                                      btn.parentElement?.classList.contains('disabled');
+                    if (!isDisabled) {
+                        result.has_prev = true;
+                    }
+                }
+            }
+
+            // 현재 활성화된 페이지 번호 찾기 (보통 강조 표시됨)
+            const pageButtons = document.querySelectorAll('button, a, li');
+            for (const btn of pageButtons) {
+                const text = btn.innerText.trim();
+                // 숫자인 경우
+                if (/^\d+$/.test(text)) {
+                    // 활성화된 페이지인지 확인 (배경색, 강조 등)
+                    const isActive = btn.classList.contains('active') ||
+                                    btn.classList.contains('selected') ||
+                                    btn.classList.contains('current') ||
+                                    btn.getAttribute('aria-current') === 'page' ||
+                                    btn.parentElement?.classList.contains('active') ||
+                                    getComputedStyle(btn).backgroundColor.includes('59, 130, 246') || // blue
+                                    getComputedStyle(btn).backgroundColor.includes('rgb(59');
+                    if (isActive) {
+                        result.current_page = parseInt(text);
+                    }
+                    // 가장 큰 숫자를 총 페이지 수로 추정
+                    const pageNum = parseInt(text);
+                    if (pageNum > result.total_pages) {
+                        result.total_pages = pageNum;
+                    }
+                }
+            }
+
+            return result;
             """
         )
         return info
     except Exception:
-        return {'has_next': False, 'has_prev': False, 'current_page': 1, 'total_pages': 1}
+        return {'has_next': False, 'has_prev': False, 'current_page': 1, 'total_pages': 1, 'total_items': 0, 'current_range': ''}
 
 
 def click_next_page(driver) -> bool:
@@ -601,32 +623,41 @@ def click_next_page(driver) -> bool:
     try:
         clicked = driver.execute_script(
             r"""
-            // 다양한 "다음" 버튼 패턴 시도
-            const selectors = [
-                'button:not([disabled])[aria-label*="next" i]',
-                'button:not([disabled])[aria-label*="Next" i]',
-                'a[aria-label*="next" i]:not([disabled])',
-                '[class*="pagination"] button:not([disabled]):last-child',
-                '[class*="pagination"] li:last-child:not(.disabled) a',
-                'button:not([disabled])[class*="next" i]',
-                '[class*="next"]:not([disabled])',
-                'button:has(svg[class*="chevron-right"])',
-                '[aria-label="Go to next page"]',
-            ];
+            // ">" 버튼 찾기 (가장 흔한 패턴)
+            const allElements = document.querySelectorAll('button, a, li, span');
 
-            for (const sel of selectors) {
-                const btn = document.querySelector(sel);
-                if (btn && !btn.disabled) {
-                    btn.click();
-                    return true;
+            for (const el of allElements) {
+                const text = el.innerText.trim();
+
+                // ">" 또는 유사한 기호
+                if (text === '>' || text === '›' || text === '»' || text === '→') {
+                    const isDisabled = el.disabled ||
+                                      el.classList.contains('disabled') ||
+                                      el.getAttribute('aria-disabled') === 'true' ||
+                                      el.parentElement?.classList.contains('disabled');
+
+                    if (!isDisabled) {
+                        // 클릭 가능한 요소 찾기
+                        const clickable = el.tagName === 'BUTTON' || el.tagName === 'A'
+                            ? el
+                            : el.querySelector('button, a') || el;
+                        clickable.click();
+                        return true;
+                    }
                 }
             }
 
-            // 패턴: ">" 또는 "»" 텍스트가 있는 버튼
-            const buttons = document.querySelectorAll('button, a');
-            for (const btn of buttons) {
-                const text = btn.innerText.trim();
-                if ((text === '>' || text === '»' || text === '→' || text.toLowerCase() === 'next') && !btn.disabled) {
+            // aria-label 기반 찾기
+            const ariaSelectors = [
+                '[aria-label*="next" i]:not([disabled])',
+                '[aria-label*="Next" i]:not([disabled])',
+                '[aria-label="Go to next page"]:not([disabled])',
+                '[title*="next" i]:not([disabled])',
+            ];
+
+            for (const sel of ariaSelectors) {
+                const btn = document.querySelector(sel);
+                if (btn && !btn.disabled) {
                     btn.click();
                     return true;
                 }
