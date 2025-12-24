@@ -497,12 +497,47 @@ def get_table_snapshot(driver) -> str | None:
 
 
 def click_submit(driver):
-    buttons = driver.find_elements(By.TAG_NAME, "button")
-    for btn in buttons:
-        if btn.text.strip().lower() == "submit":
-            btn.click()
-            return
-    raise Exception("Submit 버튼을 찾지 못했습니다.")
+    """Submit 버튼 클릭"""
+    print("  🔘 Submit 버튼 찾는 중...")
+
+    # JavaScript로 더 유연하게 찾기
+    clicked = driver.execute_script(
+        r"""
+        // 방법 1: 텍스트가 "Submit"인 버튼 찾기
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            const text = btn.innerText.trim().toLowerCase();
+            if (text === 'submit' || text === '조회' || text === '검색') {
+                btn.click();
+                console.log('Submit clicked via text match');
+                return 'text_match';
+            }
+        }
+
+        // 방법 2: type="submit" 속성
+        const submitBtn = document.querySelector('button[type="submit"]');
+        if (submitBtn) {
+            submitBtn.click();
+            console.log('Submit clicked via type=submit');
+            return 'type_submit';
+        }
+
+        // 방법 3: class나 id에 submit 포함
+        const byClass = document.querySelector('[class*="submit" i], [id*="submit" i]');
+        if (byClass) {
+            byClass.click();
+            console.log('Submit clicked via class/id');
+            return 'class_id';
+        }
+
+        return 'not_found';
+        """
+    )
+
+    if clicked == 'not_found':
+        raise Exception("Submit 버튼을 찾지 못했습니다.")
+
+    print(f"  ✅ Submit 버튼 클릭 완료 ({clicked})")
 
 
 def wait_for_table(driver, timeout=25):
@@ -695,60 +730,94 @@ def set_page_size(driver, size=50) -> bool:
             const sizeChanger = document.querySelector('.xkmgmt-pagination-options-size-changer');
             if (sizeChanger) {
                 sizeChanger.click();
-                return true;
+                return 'xkmgmt';
             }
-            return false;
+
+            // fallback: "/ page" 텍스트가 있는 요소 찾기
+            const allElements = document.querySelectorAll('span, div');
+            for (const el of allElements) {
+                if (el.innerText.match(/\d+\s*\/\s*page/i)) {
+                    el.click();
+                    return 'text';
+                }
+            }
+
+            return 'not_found';
             """
         )
 
-        if not clicked:
+        if clicked == 'not_found':
             print(f"  ⚠️ 페이지 사이즈 변경 UI를 찾지 못함")
             return False
 
+        print(f"    드롭다운 클릭 완료 ({clicked})")
+
         # 드롭다운 열리는 시간 대기
-        time.sleep(0.5)
+        time.sleep(0.8)
 
         # 2단계: 드롭다운에서 원하는 사이즈 옵션 클릭
         option_clicked = driver.execute_script(
             r"""
             const targetSize = arguments[0];
+            const targetText = targetSize + ' / page';
 
-            // xkmgmt-select-dropdown에서 옵션 찾기
-            const dropdown = document.querySelector('.xkmgmt-select-dropdown:not(.xkmgmt-select-dropdown-hidden)');
-            if (!dropdown) {
-                // 드롭다운이 아직 안 열렸으면 전체에서 찾기
-                const allOptions = document.querySelectorAll('.xkmgmt-select-item');
-                for (const opt of allOptions) {
-                    const text = opt.innerText.trim();
-                    if (text.includes(targetSize.toString()) && text.includes('page')) {
-                        opt.click();
-                        return true;
+            // 방법 1: 열린 드롭다운에서 찾기
+            const dropdowns = document.querySelectorAll('.xkmgmt-select-dropdown, [class*="select-dropdown"], [class*="dropdown-menu"]');
+            for (const dropdown of dropdowns) {
+                // hidden 클래스가 없는 것만
+                if (dropdown.classList.contains('xkmgmt-select-dropdown-hidden') ||
+                    dropdown.classList.contains('hidden') ||
+                    dropdown.style.display === 'none') {
+                    continue;
+                }
+
+                // 모든 자식 요소에서 찾기
+                const allChildren = dropdown.querySelectorAll('*');
+                for (const child of allChildren) {
+                    const text = child.innerText.trim();
+                    if (text === targetText || text === targetSize + '/page') {
+                        child.click();
+                        return 'dropdown_child';
                     }
                 }
-                return false;
             }
 
-            // 드롭다운 안의 옵션들 찾기
-            const options = dropdown.querySelectorAll('.xkmgmt-select-item, [class*="select-item"]');
-            for (const opt of options) {
-                const text = opt.innerText.trim();
-                // "50 / page" 형식 매칭
-                if (text.includes(targetSize.toString()) && text.includes('page')) {
-                    opt.click();
-                    return true;
+            // 방법 2: 전체 문서에서 "50 / page" 텍스트 찾기
+            const allElements = document.querySelectorAll('div, span, li, a');
+            for (const el of allElements) {
+                const text = el.innerText.trim();
+                if (text === targetText || text === targetSize + '/page') {
+                    // 클릭 가능한 상태인지 확인
+                    const style = getComputedStyle(el);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        el.click();
+                        return 'global_search';
+                    }
                 }
             }
 
-            return false;
+            // 방법 3: 숫자만으로 찾기
+            for (const el of allElements) {
+                const text = el.innerText.trim();
+                if (text === targetSize.toString()) {
+                    const style = getComputedStyle(el);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        el.click();
+                        return 'number_only';
+                    }
+                }
+            }
+
+            return 'option_not_found';
             """,
             size
         )
 
-        if option_clicked:
-            print(f"  ✅ 페이지 사이즈 {size}개로 변경 완료")
+        if option_clicked and option_clicked != 'option_not_found':
+            print(f"  ✅ 페이지 사이즈 {size}개로 변경 완료 ({option_clicked})")
             return True
         else:
-            print(f"  ⚠️ {size}/page 옵션을 찾지 못함")
+            print(f"  ⚠️ {size}/page 옵션을 찾지 못함 - 드롭다운 HTML 구조 확인 필요")
             return False
 
     except Exception as e:
