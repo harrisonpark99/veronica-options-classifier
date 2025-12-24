@@ -638,41 +638,44 @@ def click_next_page(driver) -> bool:
     try:
         clicked = driver.execute_script(
             r"""
-            // ">" 버튼 찾기 (가장 흔한 패턴)
-            const allElements = document.querySelectorAll('button, a, li, span');
+            // 방법 1: xkmgmt-pagination-next 클래스로 찾기 (가장 정확)
+            const nextBtn = document.querySelector('.xkmgmt-pagination-next');
+            if (nextBtn && nextBtn.getAttribute('aria-disabled') !== 'true') {
+                nextBtn.click();
+                return true;
+            }
 
+            // 방법 2: title="Next Page"로 찾기
+            const nextByTitle = document.querySelector('[title="Next Page"]');
+            if (nextByTitle && nextByTitle.getAttribute('aria-disabled') !== 'true') {
+                nextByTitle.click();
+                return true;
+            }
+
+            // 방법 3: ">" 텍스트로 찾기 (fallback)
+            const allElements = document.querySelectorAll('button, a, li, span');
             for (const el of allElements) {
                 const text = el.innerText.trim();
-
-                // ">" 또는 유사한 기호
                 if (text === '>' || text === '›' || text === '»' || text === '→') {
                     const isDisabled = el.disabled ||
                                       el.classList.contains('disabled') ||
-                                      el.getAttribute('aria-disabled') === 'true' ||
-                                      el.parentElement?.classList.contains('disabled');
-
+                                      el.getAttribute('aria-disabled') === 'true';
                     if (!isDisabled) {
-                        // 클릭 가능한 요소 찾기
-                        const clickable = el.tagName === 'BUTTON' || el.tagName === 'A'
-                            ? el
-                            : el.querySelector('button, a') || el;
-                        clickable.click();
+                        el.click();
                         return true;
                     }
                 }
             }
 
-            // aria-label 기반 찾기
+            // 방법 4: aria-label 기반 찾기
             const ariaSelectors = [
-                '[aria-label*="next" i]:not([disabled])',
-                '[aria-label*="Next" i]:not([disabled])',
-                '[aria-label="Go to next page"]:not([disabled])',
-                '[title*="next" i]:not([disabled])',
+                '[aria-label*="next" i]:not([aria-disabled="true"])',
+                '[aria-label*="Next" i]:not([aria-disabled="true"])',
+                '[title*="Next" i]:not([aria-disabled="true"])',
             ];
-
             for (const sel of ariaSelectors) {
                 const btn = document.querySelector(sel);
-                if (btn && !btn.disabled) {
+                if (btn) {
                     btn.click();
                     return true;
                 }
