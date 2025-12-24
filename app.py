@@ -87,7 +87,8 @@ def show_login_page():
         # Feature Overview
         st.markdown("### 제공 기능")
 
-        col_f1, col_f2, col_f3 = st.columns(3)
+        col_f1, col_f2 = st.columns(2)
+        col_f3, col_f4 = st.columns(2)
 
         with col_f1:
             st.markdown(
@@ -115,10 +116,21 @@ def show_login_page():
             st.markdown(
                 """
                 **Custom Candle Returns**
-                - Binance 일봉 데이터
+                - OKX 일봉 데이터
                 - 커스텀 캔들 수익률
                 - 기간별 차트 시각화
                 - 통계 요약 및 다운로드
+                """
+            )
+
+        with col_f4:
+            st.markdown(
+                """
+                **Strategy PnL Summary**
+                - 전략별 DTD/MTD/YTD PnL
+                - 카테고리별 집계
+                - Top Movers 분석
+                - CSV 다운로드
                 """
             )
 
@@ -163,6 +175,7 @@ def show_dashboard():
         st.page_link("pages/1_Option_Classifier.py", label="Option Classifier", icon="📊")
         st.page_link("pages/2_Xunke_Support.py", label="Xunke Support", icon="💹")
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
+        st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -170,7 +183,8 @@ def show_dashboard():
 
     st.markdown("---")
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
+    col3, col4 = st.columns(2)
 
     with col1:
         st.markdown("### 📊 Option Classifier")
@@ -208,7 +222,7 @@ def show_dashboard():
         st.markdown("### 📈 Custom Candle Returns")
         st.markdown(
             """
-            Binance API를 통해 커스텀 캔들 수익률을 시각화합니다.
+            OKX API를 통해 커스텀 캔들 수익률을 시각화합니다.
 
             **주요 기능:**
             - 커스텀 캔들 사이즈 설정 (1~90일)
@@ -219,6 +233,22 @@ def show_dashboard():
         )
         if st.button("Custom Candle Returns 열기", key="open_candle", use_container_width=True):
             st.switch_page("pages/3_Custom_Candle_Returns.py")
+
+    with col4:
+        st.markdown("### 💰 Strategy PnL Summary")
+        st.markdown(
+            """
+            전략별 PnL을 DTD/MTD/YTD 기준으로 분석합니다.
+
+            **주요 기능:**
+            - 전략별 DTD/MTD/YTD PnL 조회
+            - 카테고리별 집계 및 Top Movers
+            - 날짜별 조회 및 필터링
+            - CSV 다운로드
+            """
+        )
+        if st.button("Strategy PnL Summary 열기", key="open_strategy_pnl", use_container_width=True):
+            st.switch_page("pages/4_Strategy_PnL_Summary.py")
 
     st.markdown("---")
 
