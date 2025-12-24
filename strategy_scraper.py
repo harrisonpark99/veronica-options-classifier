@@ -759,52 +759,15 @@ def set_page_size(driver, size=50) -> bool:
         option_clicked = driver.execute_script(
             r"""
             const targetSize = arguments[0];
-            const targetText = targetSize + ' / page';
+            const targetTitle = targetSize + ' / page';
 
-            // 방법 1: 열린 드롭다운에서 찾기
-            const dropdowns = document.querySelectorAll('.xkmgmt-select-dropdown, [class*="select-dropdown"], [class*="dropdown-menu"]');
-            for (const dropdown of dropdowns) {
-                // hidden 클래스가 없는 것만
-                if (dropdown.classList.contains('xkmgmt-select-dropdown-hidden') ||
-                    dropdown.classList.contains('hidden') ||
-                    dropdown.style.display === 'none') {
-                    continue;
-                }
-
-                // 모든 자식 요소에서 찾기
-                const allChildren = dropdown.querySelectorAll('*');
-                for (const child of allChildren) {
-                    const text = child.innerText.trim();
-                    if (text === targetText || text === targetSize + '/page') {
-                        child.click();
-                        return 'dropdown_child';
-                    }
-                }
-            }
-
-            // 방법 2: 전체 문서에서 "50 / page" 텍스트 찾기
-            const allElements = document.querySelectorAll('div, span, li, a');
-            for (const el of allElements) {
-                const text = el.innerText.trim();
-                if (text === targetText || text === targetSize + '/page') {
-                    // 클릭 가능한 상태인지 확인
-                    const style = getComputedStyle(el);
-                    if (style.display !== 'none' && style.visibility !== 'hidden') {
-                        el.click();
-                        return 'global_search';
-                    }
-                }
-            }
-
-            // 방법 3: 숫자만으로 찾기
-            for (const el of allElements) {
-                const text = el.innerText.trim();
-                if (text === targetSize.toString()) {
-                    const style = getComputedStyle(el);
-                    if (style.display !== 'none' && style.visibility !== 'hidden') {
-                        el.click();
-                        return 'number_only';
-                    }
+            // xkmgmt-select-item-option에서 title 속성으로 찾기
+            const options = document.querySelectorAll('.xkmgmt-select-item-option');
+            for (const opt of options) {
+                const title = opt.getAttribute('title');
+                if (title === targetTitle) {
+                    opt.click();
+                    return 'title_match';
                 }
             }
 
