@@ -729,68 +729,41 @@ def set_page_size(driver, size=50) -> bool:
     Returns:
         True if 변경 성공, False if 실패
     """
+    from selenium.webdriver.common.action_chains import ActionChains
+
     print(f"  📋 페이지 사이즈 {size}개로 변경 중...")
 
     try:
         # 1단계: 드롭다운 셀렉터 클릭해서 열기
-        clicked = driver.execute_script(
-            r"""
-            // xkmgmt-pagination-options-size-changer 클래스로 찾기
-            const sizeChanger = document.querySelector('.xkmgmt-pagination-options-size-changer');
-            if (sizeChanger) {
-                sizeChanger.click();
-                return 'xkmgmt';
-            }
+        size_changer = driver.find_element(By.CSS_SELECTOR, '.xkmgmt-pagination-options-size-changer')
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", size_changer)
+        time.sleep(0.3)
 
-            // fallback: "/ page" 텍스트가 있는 요소 찾기
-            const allElements = document.querySelectorAll('span, div');
-            for (const el of allElements) {
-                if (el.innerText.match(/\d+\s*\/\s*page/i)) {
-                    el.click();
-                    return 'text';
-                }
-            }
-
-            return 'not_found';
-            """
-        )
-
-        if clicked == 'not_found':
-            print(f"  ⚠️ 페이지 사이즈 변경 UI를 찾지 못함")
-            return False
-
-        print(f"    드롭다운 클릭 완료 ({clicked})")
+        actions = ActionChains(driver)
+        actions.move_to_element(size_changer)
+        actions.click()
+        actions.perform()
+        print("    드롭다운 클릭 완료")
 
         # 드롭다운 열리는 시간 대기
-        time.sleep(0.8)
+        time.sleep(1)
 
         # 2단계: 드롭다운에서 원하는 사이즈 옵션 클릭
-        option_clicked = driver.execute_script(
-            r"""
-            const targetSize = arguments[0];
-            const targetTitle = targetSize + ' / page';
+        target_title = f"{size} / page"
+        options = driver.find_elements(By.CSS_SELECTOR, '.xkmgmt-select-item-option')
 
-            // xkmgmt-select-item-option에서 title 속성으로 찾기
-            const options = document.querySelectorAll('.xkmgmt-select-item-option');
-            for (const opt of options) {
-                const title = opt.getAttribute('title');
-                if (title === targetTitle) {
-                    opt.click();
-                    return 'title_match';
-                }
-            }
+        for opt in options:
+            title = opt.get_attribute('title')
+            if title == target_title:
+                actions = ActionChains(driver)
+                actions.move_to_element(opt)
+                actions.click()
+                actions.perform()
+                print(f"  ✅ 페이지 사이즈 {size}개로 변경 완료")
+                return True
 
-            return 'option_not_found';
-            """,
-            size
-        )
-
-        if option_clicked and option_clicked != 'option_not_found':
-            print(f"  ✅ 페이지 사이즈 {size}개로 변경 완료 ({option_clicked})")
-            return True
-        else:
-            print(f"  ⚠️ {size}/page 옵션을 찾지 못함 - 드롭다운 HTML 구조 확인 필요")
-            return False
+        print(f"  ⚠️ {size}/page 옵션을 찾지 못함")
+        return False
 
     except Exception as e:
         print(f"  ⚠️ 페이지 사이즈 변경 실패: {e}")
