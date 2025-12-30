@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 VERONICA - Strategy PnL Summary Dashboard
-Reads strategy_ytd_history.csv (long format) and shows Strategy-level DTD/MTD/YTD
+Upload strategy_ytd_history.csv and analyze Strategy-level DTD/MTD/YTD
 """
 
 import os
 import sys
-import io
 import pandas as pd
 import streamlit as st
-import requests
 
 # Import utilities
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,66 +27,19 @@ require_auth()
 
 
 # =========================
-# Data Source Config
-# =========================
-def get_csv_source():
-    """
-    Get CSV source from secrets or env.
-    Returns tuple: (source_type, source_value)
-    source_type: 'url' or 'path'
-    """
-    # Check for URL first (Google Drive)
-    if hasattr(st, 'secrets') and "STRATEGY_CSV_URL" in st.secrets:
-        return ('url', st.secrets["STRATEGY_CSV_URL"])
-    if "STRATEGY_CSV_URL" in os.environ:
-        return ('url', os.environ["STRATEGY_CSV_URL"])
-
-    # Check for file path
-    if hasattr(st, 'secrets') and "STRATEGY_CSV_PATH" in st.secrets:
-        return ('path', st.secrets["STRATEGY_CSV_PATH"])
-    if "STRATEGY_CSV_PATH" in os.environ:
-        return ('path', os.environ["STRATEGY_CSV_PATH"])
-
-    # Default path (Google Drive on Mac - for local development)
-    google_drive_base = "/Users/harrisonpark/Library/CloudStorage/GoogleDrive-harrisonpark@prestolabs.io/My Drive"
-    return ('path', os.path.join(google_drive_base, "strategy_db", "data", "db", "strategy_ytd_history.csv"))
-
-
-# =========================
 # Helpers
 # =========================
-@st.cache_data(ttl=300)  # Cache for 5 minutes
-def load_history_from_url(url):
-    """Load CSV from URL (Google Drive)."""
+def load_history(uploaded_file):
+    """Load and process uploaded CSV file."""
     try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
+        df = pd.read_csv(uploaded_file)
         df["date"] = pd.to_datetime(df["date"])
         df["pnl_usd"] = pd.to_numeric(df["pnl_usd"], errors="coerce")
         df["strategy_name"] = df["strategy_name"].astype(str).str.strip()
         df = df[~df["strategy_name"].str.upper().eq("TOTAL")]
         return df, None
-    except requests.exceptions.RequestException as e:
-        return None, f"Failed to fetch CSV from URL: {e}"
     except Exception as e:
         return None, f"Failed to parse CSV: {e}"
-
-
-@st.cache_data
-def load_history_from_path(csv_path):
-    """Load CSV from local file path."""
-    try:
-        df = pd.read_csv(csv_path)
-        df["date"] = pd.to_datetime(df["date"])
-        df["pnl_usd"] = pd.to_numeric(df["pnl_usd"], errors="coerce")
-        df["strategy_name"] = df["strategy_name"].astype(str).str.strip()
-        df = df[~df["strategy_name"].str.upper().eq("TOTAL")]
-        return df, None
-    except FileNotFoundError:
-        return None, f"CSV file not found: {csv_path}"
-    except Exception as e:
-        return None, f"Failed to load CSV: {e}"
 
 
 def pivot_ytd(df_hist):
@@ -198,7 +149,7 @@ def build_top_table(df, col, n=10, ascending=False):
 # UI
 # =========================
 st.title("Strategy PnL Summary Dashboard")
-st.caption("Strategy-level DTD/MTD/YTD PnL Summary from YTD history data")
+st.caption("Upload strategy_ytd_history.csv to analyze Strategy-level DTD/MTD/YTD PnL")
 
 # Sidebar
 with st.sidebar:
@@ -206,27 +157,32 @@ with st.sidebar:
     show_logout_button()
     st.markdown("---")
 
-# Load data based on source type
-source_type, source_value = get_csv_source()
+# File upload
+st.subheader("CSV Upload")
+uploaded_file = st.file_uploader(
+    "Upload strategy_ytd_history.csv",
+    type=["csv"],
+    help="CSV must have columns: date, strategy_name, pnl_usd"
+)
 
-if source_type == 'url':
-    with st.spinner("Loading data from Google Drive..."):
-        df_hist, error = load_history_from_url(source_value)
-else:
-    df_hist, error = load_history_from_path(source_value)
+if uploaded_file is None:
+    st.info("CSV 파일을 업로드해주세요. (필수 컬럼: date, strategy_name, pnl_usd)")
+    st.stop()
+
+# Load data
+df_hist, error = load_history(uploaded_file)
 
 if error:
     st.error(error)
-    st.info("""
-    **Setup Instructions:**
-    1. Share your CSV file on Google Drive (링크가 있는 모든 사용자)
-    2. Copy the file ID from the share link
-    3. In Streamlit Cloud → Settings → Secrets, add:
-    ```
-    STRATEGY_CSV_URL = "https://drive.google.com/uc?export=download&id=YOUR_FILE_ID"
-    ```
-    """)
     st.stop()
+
+# Validate required columns
+required_cols = ["date", "strategy_name", "pnl_usd"]
+missing_cols = [c for c in required_cols if c not in df_hist.columns]
+if missing_cols:
+    st.error(f"Missing required columns: {missing_cols}")
+    st.stop()
+
 wide = pivot_ytd(df_hist)
 
 available_dates = list(wide.index)
@@ -264,6 +220,8 @@ if search.strip():
 df_strategy_full = df_strategy.copy()
 df_strategy_view = df_strategy.sort_values(sort_by, ascending=ascending).head(top_n)
 df_cat = category_summary(df_strategy_full)
+
+st.divider()
 
 # Header metrics
 c1, c2, c3 = st.columns(3)
