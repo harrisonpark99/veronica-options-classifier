@@ -8,6 +8,7 @@ import os
 import sys
 import pandas as pd
 import streamlit as st
+import plotly.graph_objects as go
 
 # Import utilities
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -145,6 +146,44 @@ def build_top_table(df, col, n=10, ascending=False):
     return df2
 
 
+def compute_category_ytd_history(df_hist, categories):
+    """Compute YTD history for selected categories combined."""
+    df = df_hist.copy()
+    df["category"] = df["strategy_name"].apply(infer_category)
+
+    # Filter by selected categories (case-insensitive)
+    categories_lower = [c.lower().strip() for c in categories]
+    df_filtered = df[df["category"].isin(categories_lower)]
+
+    if df_filtered.empty:
+        return None
+
+    # Group by date and sum pnl_usd
+    ytd_history = (
+        df_filtered.groupby("date")["pnl_usd"]
+        .sum()
+        .reset_index()
+        .sort_values("date")
+    )
+    ytd_history.columns = ["date", "ytd_pnl"]
+    return ytd_history
+
+
+def compute_category_group_summary(df_strategy_full, categories):
+    """Compute DTD/MTD/YTD for selected categories combined."""
+    categories_lower = [c.lower().strip() for c in categories]
+    df_filtered = df_strategy_full[df_strategy_full["category"].isin(categories_lower)]
+
+    if df_filtered.empty:
+        return None, None, None
+
+    total_dtd = df_filtered["DTD"].sum(skipna=True)
+    total_mtd = df_filtered["MTD"].sum(skipna=True)
+    total_ytd = df_filtered["YTD"].sum(skipna=True)
+
+    return total_dtd, total_mtd, total_ytd
+
+
 # =========================
 # UI
 # =========================
@@ -250,6 +289,81 @@ df_cat_display = df_cat.copy()
 for col in ["DTD", "MTD", "YTD"]:
     df_cat_display[col] = df_cat_display[col].apply(format_money)
 st.dataframe(df_cat_display, use_container_width=True)
+
+st.divider()
+
+# Custom Category Group Analysis
+st.subheader("Custom Category Group Analysis")
+st.caption("Enter category names (comma-separated) to see combined PnL and YTD trend")
+
+# Get available categories for reference
+available_categories = sorted(df_strategy_full["category"].unique().tolist())
+st.info(f"Available categories: {', '.join(available_categories)}")
+
+category_input = st.text_input(
+    "Categories to analyze (comma-separated)",
+    placeholder="e.g., passive, defi, unsecured",
+    help="Enter category names separated by commas"
+)
+
+if category_input.strip():
+    selected_categories = [c.strip() for c in category_input.split(",") if c.strip()]
+
+    if selected_categories:
+        # Compute combined DTD/MTD/YTD
+        group_dtd, group_mtd, group_ytd = compute_category_group_summary(df_strategy_full, selected_categories)
+
+        if group_dtd is not None:
+            st.markdown(f"**Selected Categories:** {', '.join(selected_categories)}")
+
+            # Show combined metrics
+            g1, g2, g3 = st.columns(3)
+            g1.metric("Combined DTD", format_money(group_dtd))
+            g2.metric("Combined MTD", format_money(group_mtd))
+            g3.metric("Combined YTD", format_money(group_ytd))
+
+            # Compute and show YTD history chart
+            ytd_history = compute_category_ytd_history(df_hist, selected_categories)
+
+            if ytd_history is not None and not ytd_history.empty:
+                st.markdown("### YTD Historical Trend")
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=ytd_history["date"],
+                    y=ytd_history["ytd_pnl"],
+                    mode="lines+markers",
+                    name="Combined YTD PnL",
+                    line=dict(color="#1E88E5", width=2),
+                    marker=dict(size=4),
+                    hovertemplate="Date: %{x|%Y-%m-%d}<br>YTD PnL: $%{y:,.2f}<extra></extra>"
+                ))
+
+                # Add zero line
+                fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+
+                fig.update_layout(
+                    title=f"YTD PnL Trend: {', '.join(selected_categories)}",
+                    xaxis_title="Date",
+                    yaxis_title="YTD PnL (USD)",
+                    plot_bgcolor="white",
+                    hovermode="x unified",
+                    height=400,
+                    margin=dict(l=40, r=40, t=60, b=40),
+                    yaxis=dict(tickformat="$,.0f")
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Show data table
+                with st.expander("View YTD History Data"):
+                    ytd_display = ytd_history.copy()
+                    ytd_display["ytd_pnl"] = ytd_display["ytd_pnl"].apply(format_money)
+                    st.dataframe(ytd_display, use_container_width=True)
+            else:
+                st.warning("No historical data available for selected categories.")
+        else:
+            st.warning(f"No data found for categories: {', '.join(selected_categories)}")
 
 st.divider()
 
