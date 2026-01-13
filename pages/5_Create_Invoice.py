@@ -145,6 +145,15 @@ def border_cells(ws, cells: list):
         ws[cell].border = border
 
 
+def set_white_borders(ws, max_row=20, max_col=10):
+    """Set white borders on all cells to make sheet look like clean white paper."""
+    white = Side(style="thin", color="FFFFFF")
+    white_border = Border(left=white, right=white, top=white, bottom=white)
+    for r in range(1, max_row + 1):
+        for c in range(1, max_col + 1):
+            ws.cell(row=r, column=c).border = white_border
+
+
 def truncate_usdt(value: float) -> float:
     """Truncate USDT value to 2 decimal places (cut off, not round)."""
     return math.floor(value * 100) / 100
@@ -183,6 +192,9 @@ def build_invoice_workbook(
     # ========== Summary Sheet ==========
     ws_sum = wb.active
     ws_sum.title = "Summary"
+
+    # Set white borders first (clean white paper look)
+    set_white_borders(ws_sum, max_row=15, max_col=8)
 
     ws_sum["A1"] = "Client:"
     ws_sum["B1"] = client
