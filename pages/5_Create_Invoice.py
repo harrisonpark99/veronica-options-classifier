@@ -5,6 +5,7 @@ Generates Excel invoice with same cell positions as template
 """
 
 import io
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
 
@@ -136,6 +137,19 @@ def border_table(ws, r1, r2, c1=1, c2=18):
             ws.cell(row=r, column=c).border = border
 
 
+def border_cells(ws, cells: list):
+    """Apply borders to specific cells."""
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in cells:
+        ws[cell].border = border
+
+
+def truncate_usdt(value: float) -> float:
+    """Truncate USDT value to 2 decimal places (cut off, not round)."""
+    return math.floor(value * 100) / 100
+
+
 def build_invoice_workbook(
     df_raw: pd.DataFrame,
     client: str,
@@ -191,24 +205,24 @@ def build_invoice_workbook(
         ws_sum["E6"] = "Buy"
 
         ws_sum["A7"] = "Filled Value:"
-        ws_sum["B7"] = filled_value
+        ws_sum["B7"] = truncate_usdt(filled_value)
         ws_sum["C7"] = "(USDT)"
         ws_sum["D7"] = "Buy order amount"
-        ws_sum["E7"] = gross
+        ws_sum["E7"] = truncate_usdt(gross)
         ws_sum["F7"] = "(USDT)"
 
         ws_sum["A8"] = "Average Filled Price:"
-        ws_sum["B8"] = avg_price
+        ws_sum["B8"] = truncate_usdt(avg_price)
         ws_sum["C8"] = f"(USDT/{base_asset})"
         ws_sum["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws_sum["E8"] = fee_amount
+        ws_sum["E8"] = truncate_usdt(fee_amount)
         ws_sum["F8"] = "(USDT)"
 
         ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
-        ws_sum["B9"] = fee_amount
+        ws_sum["B9"] = truncate_usdt(fee_amount)
         ws_sum["C9"] = "(USDT)"
         ws_sum["D9"] = "Net of fee Buy order amount"
-        ws_sum["E9"] = gross - fee_amount
+        ws_sum["E9"] = truncate_usdt(gross - fee_amount)
         ws_sum["F9"] = "(USDT)"
 
         ws_sum["A10"] = "Settlement Amount:"
@@ -218,6 +232,13 @@ def build_invoice_workbook(
         if rebate_usdt and rebate_usdt != 0:
             ws_sum["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
 
+        # Apply borders to data cells
+        border_cells(ws_sum, ["A6", "B6", "C6", "D6", "E6",
+                              "A7", "B7", "C7", "D7", "E7", "F7",
+                              "A8", "B8", "C8", "D8", "E8", "F8",
+                              "A9", "B9", "C9", "D9", "E9", "F9",
+                              "A10", "B10", "C10"])
+
     else:  # SELL
         ws_sum["B5"] = "Amount"
         ws_sum["B5"].font = Font(bold=True)
@@ -226,20 +247,27 @@ def build_invoice_workbook(
         ws_sum["B6"] = filled_amount
 
         ws_sum["A7"] = "매도 총액:"
-        ws_sum["B7"] = filled_value
+        ws_sum["B7"] = truncate_usdt(filled_value)
         ws_sum["C7"] = "(USDT)"
 
         ws_sum["A8"] = "매도 평단:"
-        ws_sum["B8"] = avg_price
+        ws_sum["B8"] = truncate_usdt(avg_price)
         ws_sum["C8"] = f"(USDT/{base_asset})"
 
         ws_sum["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
-        ws_sum["B9"] = fee_amount
+        ws_sum["B9"] = truncate_usdt(fee_amount)
         ws_sum["C9"] = "(USDT)"
 
         ws_sum["A10"] = "정산 금액:"
-        ws_sum["B10"] = net
+        ws_sum["B10"] = truncate_usdt(net)
         ws_sum["C10"] = "(USDT)"
+
+        # Apply borders to data cells
+        border_cells(ws_sum, ["A6", "B6",
+                              "A7", "B7", "C7",
+                              "A8", "B8", "C8",
+                              "A9", "B9", "C9",
+                              "A10", "B10", "C10"])
 
     # ========== Date Sheet (Trading Data) ==========
     ws = wb.create_sheet(sheet_date)
@@ -265,24 +293,24 @@ def build_invoice_workbook(
         ws["E6"] = "Buy"
 
         ws["A7"] = "Filled Value:"
-        ws["B7"] = "=Q15"
+        ws["B7"] = "=TRUNC(Q15,2)"
         ws["C7"] = "(USDT)"
         ws["D7"] = "Buy order amount"
-        ws["E7"] = gross
+        ws["E7"] = truncate_usdt(gross)
         ws["F7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
-        ws["B8"] = "=R15"
+        ws["B8"] = "=TRUNC(R15,2)"
         ws["C8"] = f"(USDT/{base_asset})"
         ws["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws["E8"] = f"=E7*{fee_rate}"
+        ws["E8"] = f"=TRUNC(E7*{fee_rate},2)"
         ws["F8"] = "(USDT)"
 
         ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
         ws["B9"] = "=E8"
         ws["C9"] = "(USDT)"
         ws["D9"] = "Net of fee Buy order amount"
-        ws["E9"] = "=E7-E8"
+        ws["E9"] = "=TRUNC(E7-E8,2)"
         ws["F9"] = "(USDT)"
 
         ws["A10"] = "Settlement Amount:"
@@ -292,6 +320,13 @@ def build_invoice_workbook(
         if rebate_usdt and rebate_usdt != 0:
             ws["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
 
+        # Apply borders to data cells
+        border_cells(ws, ["A6", "B6", "C6", "D6", "E6",
+                         "A7", "B7", "C7", "D7", "E7", "F7",
+                         "A8", "B8", "C8", "D8", "E8", "F8",
+                         "A9", "B9", "C9", "D9", "E9", "F9",
+                         "A10", "B10", "C10"])
+
     else:  # SELL
         ws["B5"] = "Amount"
         ws["B5"].font = Font(bold=True)
@@ -300,20 +335,27 @@ def build_invoice_workbook(
         ws["B6"] = "=P15"
 
         ws["A7"] = "매도 총액:"
-        ws["B7"] = "=Q15"
+        ws["B7"] = "=TRUNC(Q15,2)"
         ws["C7"] = "(USDT)"
 
         ws["A8"] = "매도 평단:"
-        ws["B8"] = "=R15"
+        ws["B8"] = "=TRUNC(R15,2)"
         ws["C8"] = f"(USDT/{base_asset})"
 
         ws["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
-        ws["B9"] = f"=B7*{fee_rate}"
+        ws["B9"] = f"=TRUNC(B7*{fee_rate},2)"
         ws["C9"] = "(USDT)"
 
         ws["A10"] = "정산 금액:"
-        ws["B10"] = "=B7-B9"
+        ws["B10"] = "=TRUNC(B7-B9,2)"
         ws["C10"] = "(USDT)"
+
+        # Apply borders to data cells
+        border_cells(ws, ["A6", "B6",
+                         "A7", "B7", "C7",
+                         "A8", "B8", "C8",
+                         "A9", "B9", "C9",
+                         "A10", "B10", "C10"])
 
     # Trading Data section
     ws["A13"] = "Trading Data"
@@ -347,8 +389,8 @@ def build_invoice_workbook(
 
     # Totals in P15/Q15/R15
     ws["P15"] = filled_amount
-    ws["Q15"] = filled_value
-    ws["R15"] = avg_price
+    ws["Q15"] = truncate_usdt(filled_value)
+    ws["R15"] = truncate_usdt(avg_price)
 
     # Table borders
     border_table(ws, r1=14, r2=start_row + max(n, 1) - 1, c1=1, c2=len(TABLE_HEADERS))
