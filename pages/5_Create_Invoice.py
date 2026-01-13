@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Invoice Generator - Multi-Exchange Support
+Create Invoice - Multi-Exchange Support
 Converts trade execution CSV to invoice Excel template.
 """
 
@@ -335,8 +335,8 @@ def normalize_columns(df: pd.DataFrame, config: ExchangeConfig) -> pd.DataFrame:
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="Invoice Generator", layout="wide")
-st.title("Invoice Generator")
+st.set_page_config(page_title="Create Invoice", layout="wide")
+st.title("Create Invoice")
 st.caption("체결내역 CSV -> Invoice 템플릿 자동 생성 (다중 거래소 지원)")
 
 # Sidebar

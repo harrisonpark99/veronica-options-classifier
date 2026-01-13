@@ -137,7 +137,7 @@ def show_login_page():
         with col_f5:
             st.markdown(
                 """
-                **Invoice Generator**
+                **Create Invoice**
                 - 체결내역 CSV 업로드
                 - 다중 거래소 지원
                 - Invoice 템플릿 자동 생성
@@ -187,7 +187,7 @@ def show_dashboard():
         st.page_link("pages/2_Xunke_Support.py", label="Xunke Support", icon="💹")
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
-        st.page_link("pages/5_Invoice_Generator.py", label="Invoice Generator", icon="📄")
+        st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -264,7 +264,7 @@ def show_dashboard():
             st.switch_page("pages/4_Strategy_PnL_Summary.py")
 
     with col5:
-        st.markdown("### 📄 Invoice Generator")
+        st.markdown("### 📄 Create Invoice")
         st.markdown(
             """
             거래소 체결내역 CSV를 Invoice 템플릿으로 변환합니다.
@@ -276,8 +276,8 @@ def show_dashboard():
             - XLSX 다운로드
             """
         )
-        if st.button("Invoice Generator 열기", key="open_invoice", use_container_width=True):
-            st.switch_page("pages/5_Invoice_Generator.py")
+        if st.button("Create Invoice 열기", key="open_create_invoice", use_container_width=True):
+            st.switch_page("pages/5_Create_Invoice.py")
 
     st.markdown("---")
 
