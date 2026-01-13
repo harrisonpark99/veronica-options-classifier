@@ -87,8 +87,8 @@ def show_login_page():
         # Feature Overview
         st.markdown("### 제공 기능")
 
-        col_f1, col_f2 = st.columns(2)
-        col_f3, col_f4 = st.columns(2)
+        col_f1, col_f2, col_f3 = st.columns(3)
+        col_f4, col_f5, _ = st.columns(3)
 
         with col_f1:
             st.markdown(
@@ -134,6 +134,17 @@ def show_login_page():
                 """
             )
 
+        with col_f5:
+            st.markdown(
+                """
+                **Create Invoice**
+                - 체결내역 CSV 업로드
+                - 다중 거래소 지원
+                - Invoice 템플릿 자동 생성
+                - XLSX 다운로드
+                """
+            )
+
         st.markdown("---")
         st.caption("문의: 관리자에게 연락하세요")
 
@@ -176,6 +187,7 @@ def show_dashboard():
         st.page_link("pages/2_Xunke_Support.py", label="Xunke Support", icon="💹")
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
+        st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -185,6 +197,7 @@ def show_dashboard():
 
     col1, col2 = st.columns(2)
     col3, col4 = st.columns(2)
+    col5, _ = st.columns(2)
 
     with col1:
         st.markdown("### 📊 Option Classifier")
@@ -249,6 +262,22 @@ def show_dashboard():
         )
         if st.button("Strategy PnL Summary 열기", key="open_strategy_pnl", use_container_width=True):
             st.switch_page("pages/4_Strategy_PnL_Summary.py")
+
+    with col5:
+        st.markdown("### 📄 Create Invoice")
+        st.markdown(
+            """
+            거래소 체결내역 CSV를 Invoice 템플릿으로 변환합니다.
+
+            **주요 기능:**
+            - 다중 거래소 지원 (Binance, OKX, Bybit 등)
+            - 거래소 자동 감지
+            - Invoice 템플릿 자동 생성
+            - XLSX 다운로드
+            """
+        )
+        if st.button("Create Invoice 열기", key="open_create_invoice", use_container_width=True):
+            st.switch_page("pages/5_Create_Invoice.py")
 
     st.markdown("---")
 
