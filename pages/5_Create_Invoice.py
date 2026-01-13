@@ -194,7 +194,7 @@ def build_invoice_workbook(
     ws_sum.title = "Summary"
 
     # Set white borders first (clean white paper look)
-    set_white_borders(ws_sum, max_row=15, max_col=8)
+    set_white_borders(ws_sum, max_row=50, max_col=20)
 
     ws_sum["A1"] = "Client:"
     ws_sum["B1"] = client
@@ -252,33 +252,48 @@ def build_invoice_workbook(
                               "A10", "B10", "C10"])
 
     else:  # SELL
+        ws_sum["A5"] = "Execution summary"
         ws_sum["B5"] = "Amount"
-        ws_sum["B5"].font = Font(bold=True)
+        ws_sum["D5"] = "Order summary"
+        ws_sum["A5"].font = Font(bold=True)
+        ws_sum["D5"].font = Font(bold=True)
 
-        ws_sum["A6"] = f"Fill_amount ({base_asset}):"
+        ws_sum["A6"] = "Filled Amount:"
         ws_sum["B6"] = filled_amount
+        ws_sum["C6"] = f"({base_asset})"
+        ws_sum["D6"] = "Order type"
+        ws_sum["E6"] = "Sell"
 
-        ws_sum["A7"] = "매도 총액:"
+        ws_sum["A7"] = "Filled Value:"
         ws_sum["B7"] = truncate_usdt(filled_value)
         ws_sum["C7"] = "(USDT)"
+        ws_sum["D7"] = "Sell order amount"
+        ws_sum["E7"] = truncate_usdt(gross)
+        ws_sum["F7"] = "(USDT)"
 
-        ws_sum["A8"] = "매도 평단:"
+        ws_sum["A8"] = "Average Filled Price:"
         ws_sum["B8"] = truncate_usdt(avg_price)
         ws_sum["C8"] = f"(USDT/{base_asset})"
+        ws_sum["D8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["E8"] = truncate_usdt(fee_amount)
+        ws_sum["F8"] = "(USDT)"
 
-        ws_sum["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
+        ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
         ws_sum["B9"] = truncate_usdt(fee_amount)
         ws_sum["C9"] = "(USDT)"
+        ws_sum["D9"] = "Net of fee Sell order amount"
+        ws_sum["E9"] = truncate_usdt(net)
+        ws_sum["F9"] = "(USDT)"
 
-        ws_sum["A10"] = "정산 금액:"
+        ws_sum["A10"] = "Settlement Amount:"
         ws_sum["B10"] = truncate_usdt(net)
         ws_sum["C10"] = "(USDT)"
 
         # Apply borders to data cells
-        border_cells(ws_sum, ["A6", "B6",
-                              "A7", "B7", "C7",
-                              "A8", "B8", "C8",
-                              "A9", "B9", "C9",
+        border_cells(ws_sum, ["A6", "B6", "C6", "D6", "E6",
+                              "A7", "B7", "C7", "D7", "E7", "F7",
+                              "A8", "B8", "C8", "D8", "E8", "F8",
+                              "A9", "B9", "C9", "D9", "E9", "F9",
                               "A10", "B10", "C10"])
 
     # ========== Date Sheet (Trading Data) ==========
@@ -340,33 +355,48 @@ def build_invoice_workbook(
                          "A10", "B10", "C10"])
 
     else:  # SELL
+        ws["A5"] = "Execution summary"
         ws["B5"] = "Amount"
-        ws["B5"].font = Font(bold=True)
+        ws["D5"] = "Order summary"
+        ws["A5"].font = Font(bold=True)
+        ws["D5"].font = Font(bold=True)
 
-        ws["A6"] = f"Fill_amount ({base_asset}):"
+        ws["A6"] = "Filled Amount:"
         ws["B6"] = "=P15"
+        ws["C6"] = f"({base_asset})"
+        ws["D6"] = "Order type"
+        ws["E6"] = "Sell"
 
-        ws["A7"] = "매도 총액:"
+        ws["A7"] = "Filled Value:"
         ws["B7"] = "=TRUNC(Q15,2)"
         ws["C7"] = "(USDT)"
+        ws["D7"] = "Sell order amount"
+        ws["E7"] = truncate_usdt(gross)
+        ws["F7"] = "(USDT)"
 
-        ws["A8"] = "매도 평단:"
+        ws["A8"] = "Average Filled Price:"
         ws["B8"] = "=TRUNC(R15,2)"
         ws["C8"] = f"(USDT/{base_asset})"
+        ws["D8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["E8"] = f"=TRUNC(E7*{fee_rate},2)"
+        ws["F8"] = "(USDT)"
 
-        ws["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
-        ws["B9"] = f"=TRUNC(B7*{fee_rate},2)"
+        ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws["B9"] = "=E8"
         ws["C9"] = "(USDT)"
+        ws["D9"] = "Net of fee Sell order amount"
+        ws["E9"] = "=TRUNC(E7-E8,2)"
+        ws["F9"] = "(USDT)"
 
-        ws["A10"] = "정산 금액:"
-        ws["B10"] = "=TRUNC(B7-B9,2)"
+        ws["A10"] = "Settlement Amount:"
+        ws["B10"] = "=E9"
         ws["C10"] = "(USDT)"
 
         # Apply borders to data cells
-        border_cells(ws, ["A6", "B6",
-                         "A7", "B7", "C7",
-                         "A8", "B8", "C8",
-                         "A9", "B9", "C9",
+        border_cells(ws, ["A6", "B6", "C6", "D6", "E6",
+                         "A7", "B7", "C7", "D7", "E7", "F7",
+                         "A8", "B8", "C8", "D8", "E8", "F8",
+                         "A9", "B9", "C9", "D9", "E9", "F9",
                          "A10", "B10", "C10"])
 
     # Trading Data section
