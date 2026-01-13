@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-Create Invoice - Simplified UI
-Converts trade execution CSV to invoice Excel template.
+Create Invoice - Auto-generate invoice from trade execution CSV
+Generates Excel invoice with same cell positions as template
 """
 
 import io
-import copy
-from typing import Dict, Optional, Tuple
+from datetime import datetime, timezone, timedelta
+from typing import Tuple
 
 import pandas as pd
 import streamlit as st
-from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
+
 
 # -----------------------------
 # Auth Check
@@ -22,266 +24,336 @@ if "auth_ok" not in st.session_state or not st.session_state.auth_ok:
 
 
 # -----------------------------
-# Binance Configuration
+# Binance CSV Configuration
 # -----------------------------
 BINANCE_REQUIRED_COLS = [
     "symbol", "id", "orderId", "orderListId", "price", "qty", "quoteQty",
     "commission", "commissionAsset", "time", "isBuyer", "isMaker", "isBestMatch",
 ]
-
-BINANCE_OPTIONAL_COLS = [
-    "fill_time(UTC+8)", "fill_value", "sum_fill_amount", "sum_fill_value", "ave_fill_price"
-]
-
 BINANCE_NUMERIC_COLS = ["price", "qty", "quoteQty", "commission"]
 
-BINANCE_HEADER_MAP = {
-    "symbol": ["symbol"],
-    "id": ["id"],
-    "orderId": ["orderid", "order id"],
-    "orderListId": ["orderlistid", "order list id"],
-    "price": ["price"],
-    "qty": ["qty", "quantity"],
-    "quoteQty": ["quoteqty", "quote qty", "amount"],
-    "commission": ["commission", "fee"],
-    "commissionAsset": ["commissionasset", "fee asset"],
-    "time": ["time", "timestamp"],
-    "isBuyer": ["isbuyer", "buyer", "side"],
-    "isMaker": ["ismaker", "maker"],
-    "isBestMatch": ["isbestmatch", "bestmatch"],
-    "fill_time(UTC+8)": ["fill_time(utc+8)", "fill time(utc+8)", "fill time"],
-    "fill_value": ["fill_value", "fill value"],
-    "sum_fill_amount": ["sum_fill_amount", "sum fill amount"],
-    "sum_fill_value": ["sum_fill_value", "sum fill value"],
-    "ave_fill_price": ["ave_fill_price", "ave fill price", "avg fill price"],
-}
-
-# Summary labels for template
-SUMMARY_LABELS = {
-    "filled amount": "filled_amount",
-    "filled value": "filled_value",
-    "average filled price": "avg_price",
-    "fee": "fee_amount",
-    "fee rate": "fee_rate",
-    "net of fee": "net",
-    "buy order amount": "gross_buy",
-    "sell order amount": "gross_sell",
-    "rebate": "rebate",
-}
-
-SUMMARY_LABEL_VARIANTS = {
-    "filled amount(btc)": "filled_amount",
-    "filled amount (btc)": "filled_amount",
-    "filled value(usdt)": "filled_value",
-    "filled value (usdt)": "filled_value",
-    "avg filled price": "avg_price",
-    "average price": "avg_price",
-    "net": "net",
-}
+TABLE_HEADERS = [
+    "symbol", "id", "orderId", "orderListId", "price", "qty", "quoteQty",
+    "commission", "commissionAsset", "time", "isBuyer", "isMaker", "isBestMatch",
+    "fill_time(UTC+8)", "fill_value", "sum_fill_amount", "sum_fill_value", "ave_fill_price"
+]  # A~R (18 cols)
 
 
 # -----------------------------
 # Helper Functions
 # -----------------------------
-def norm(s: str) -> str:
-    return str(s).strip().lower()
-
-
-def compute_totals(df: pd.DataFrame) -> Tuple[float, float, float]:
+def compute_totals(df: pd.DataFrame) -> Tuple[float, float, float, float]:
+    """Compute filled_amount, filled_value, avg_price, total_commission."""
     filled_amount = float(pd.to_numeric(df["qty"], errors="coerce").fillna(0).sum())
     filled_value = float(pd.to_numeric(df["quoteQty"], errors="coerce").fillna(0).sum())
-    avg_price = (filled_value / filled_amount) if filled_amount != 0 else 0.0
-    return filled_amount, filled_value, avg_price
+    avg_price = (filled_value / filled_amount) if filled_amount else 0.0
+    total_commission = float(pd.to_numeric(df["commission"], errors="coerce").fillna(0).sum())
+    return filled_amount, filled_value, avg_price, total_commission
 
 
-def copy_row_style(ws: Worksheet, src_row: int, dst_row: int, max_col: int):
+def ensure_fill_time_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Add fill_time(UTC+8), fill_value columns for template compatibility."""
+    out = df.copy()
+
+    # fill_time(UTC+8): convert Binance ms epoch to UTC+8 string
+    if "fill_time(UTC+8)" not in out.columns:
+        if "time" in out.columns:
+            utc = pd.to_datetime(out["time"], unit="ms", utc=True, errors="coerce")
+            utc8 = utc.dt.tz_convert("Asia/Shanghai")  # UTC+8
+            out["fill_time(UTC+8)"] = utc8.dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            out["fill_time(UTC+8)"] = ""
+
+    # fill_value = quoteQty
+    if "fill_value" not in out.columns:
+        out["fill_value"] = out["quoteQty"]
+
+    # sum columns (filled on first row only)
+    for c in ["sum_fill_amount", "sum_fill_value", "ave_fill_price"]:
+        if c not in out.columns:
+            out[c] = None
+
+    return out
+
+
+def infer_sheet_date(df: pd.DataFrame, side: str) -> str:
+    """Generate sheet name from date: BUY=YYMMDD, SELL=YYYYMMDD."""
+    dt = None
+    if "fill_time(UTC+8)" in df.columns and df["fill_time(UTC+8)"].notna().any():
+        s = str(df["fill_time(UTC+8)"].dropna().iloc[0])
+        try:
+            dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            dt = None
+    if dt is None and "time" in df.columns:
+        try:
+            ms = int(df["time"].dropna().iloc[0])
+            dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+            dt = dt.astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+        except Exception:
+            dt = datetime.now()
+
+    if dt is None:
+        dt = datetime.now()
+
+    if side.upper() == "BUY":
+        return dt.strftime("%y%m%d")  # YYMMDD
+    return dt.strftime("%Y%m%d")      # YYYYMMDD
+
+
+def set_col_widths(ws, max_col=18):
+    """Set column widths for template appearance."""
+    widths = {
+        1: 12, 2: 16, 3: 16, 4: 14, 5: 12, 6: 12, 7: 14, 8: 12, 9: 14,
+        10: 16, 11: 10, 12: 10, 13: 12, 14: 20, 15: 14, 16: 16, 17: 16, 18: 16
+    }
     for c in range(1, max_col + 1):
-        src = ws.cell(row=src_row, column=c)
-        dst = ws.cell(row=dst_row, column=c)
-        if src.has_style:
-            dst._style = copy.copy(src._style)
-        dst.number_format = src.number_format
-        dst.font = copy.copy(src.font)
-        dst.fill = copy.copy(src.fill)
-        dst.border = copy.copy(src.border)
-        dst.alignment = copy.copy(src.alignment)
-        dst.protection = copy.copy(src.protection)
+        ws.column_dimensions[get_column_letter(c)].width = widths.get(c, 14)
 
 
-def find_sheet_with_trading_data(wb) -> Optional[Worksheet]:
-    for ws in wb.worksheets:
-        for row in ws.iter_rows(values_only=True):
-            for v in row:
-                if isinstance(v, str) and norm(v) == "trading data":
-                    return ws
-    for ws in wb.worksheets:
-        if norm(ws.title) != "summary":
-            return ws
-    return wb.worksheets[0] if wb.worksheets else None
+def style_header(ws, row=14, start_col=1, end_col=18):
+    """Apply header styling to table header row."""
+    header_font = Font(bold=True, size=10, color="FFFFFF")
+    fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+    thin = Side(style="thin", color="D0D0D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    align = Alignment(horizontal="center", vertical="center")
+
+    for c in range(start_col, end_col + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.font = header_font
+        cell.fill = fill
+        cell.border = border
+        cell.alignment = align
 
 
-def find_header_row_and_map(ws: Worksheet) -> Tuple[int, Dict[str, int], int]:
-    max_row = min(ws.max_row, 300)
-    max_col = min(ws.max_column, 60)
-
-    best_row = None
-    best_score = -1
-    key_headers = ["symbol", "price", "qty", "quoteqty", "commission", "time"]
-
-    for r in range(1, max_row + 1):
-        vals = []
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=r, column=c).value
-            if v is None:
-                vals.append("")
-            else:
-                vals.append(norm(v) if isinstance(v, str) else norm(str(v)))
-        score = sum(1 for k in key_headers if k in vals)
-        if score > best_score:
-            best_score = score
-            best_row = r
-
-    header_row = best_row if best_row is not None else 14
-
-    header_vals = {}
-    for c in range(1, max_col + 1):
-        v = ws.cell(row=header_row, column=c).value
-        if v is None:
-            continue
-        header_vals[norm(v)] = c
-
-    mapping: Dict[str, int] = {}
-    for df_col, variants in BINANCE_HEADER_MAP.items():
-        for v in variants:
-            if v in header_vals:
-                mapping[df_col] = header_vals[v]
-                break
-
-    return header_row, mapping, max_col
+def border_table(ws, r1, r2, c1=1, c2=18):
+    """Apply borders to table area."""
+    thin = Side(style="thin", color="D0D0D0")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for r in range(r1, r2 + 1):
+        for c in range(c1, c2 + 1):
+            ws.cell(row=r, column=c).border = border
 
 
-def clear_table_area(ws: Worksheet, start_row: int, start_col: int, end_row: int, end_col: int):
-    for r in range(start_row, end_row + 1):
-        for c in range(start_col, end_col + 1):
-            ws.cell(row=r, column=c).value = None
+def build_invoice_workbook(
+    df_raw: pd.DataFrame,
+    client: str,
+    side: str,
+    fee_rate: float,
+    rebate_usdt: float = 0.0,
+) -> Workbook:
+    """Create invoice Excel workbook matching template cell positions."""
+    side = side.upper()
+    df = ensure_fill_time_columns(df_raw)
 
+    # Compute totals
+    filled_amount, filled_value, avg_price, _ = compute_totals(df)
 
-def write_trading_table(ws: Worksheet, df: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
-    header_row, colmap, max_col = find_header_row_and_map(ws)
-    data_start = header_row + 1
-
-    writable_cols = [c for c in df.columns if c in colmap]
-
-    if not writable_cols:
-        all_cols = BINANCE_REQUIRED_COLS + [c for c in BINANCE_OPTIONAL_COLS if c in df.columns]
-        writable_cols = [c for c in all_cols if c in df.columns]
-        colmap = {col: i + 1 for i, col in enumerate(writable_cols)}
-
-    end_row = min(ws.max_row, data_start + 5000)
-    end_col = max(colmap.values()) if colmap else 20
-    clear_table_area(ws, data_start, 1, end_row, end_col)
-
-    style_src_row = data_start
-
-    for i, (_, row) in enumerate(df.iterrows()):
-        r = data_start + i
-        copy_row_style(ws, style_src_row, r, max(end_col, 20))
-
-        for col in writable_cols:
-            c = colmap[col]
-            val = row[col]
-            if pd.isna(val):
-                val = None
-            elif isinstance(val, pd.Timestamp):
-                val = val.to_pydatetime()
-            ws.cell(row=r, column=c).value = val
-
-    return data_start, colmap
-
-
-def set_value_next_to_label(ws: Worksheet, label_key: str, value) -> bool:
-    target = norm(label_key)
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
-            if isinstance(v, str) and target == norm(v):
-                ws.cell(row=r, column=c + 1).value = value
-                return True
-    return False
-
-
-def set_value_by_label_fuzzy(ws: Worksheet, label_text: str, value) -> bool:
-    needle = norm(label_text)
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            v = ws.cell(row=r, column=c).value
-            if isinstance(v, str):
-                if needle in norm(v):
-                    ws.cell(row=r, column=c + 1).value = value
-                    return True
-    return False
-
-
-def update_summary_sheets(wb, side: str, fee_rate: float, filled_amount: float,
-                          filled_value: float, avg_price: float):
-    rebate = 0.0
-
+    # Fee calculations
     if side == "BUY":
-        net = filled_value
-        gross = net / (1 - fee_rate) if (1 - fee_rate) != 0 else net
-        fee_amount = gross - net
-        gross_buy = gross
-        gross_sell = None
+        net = filled_value - float(rebate_usdt)
+        gross = net / (1.0 - fee_rate) if (1.0 - fee_rate) else net
+        fee_amount = gross * fee_rate
     else:  # SELL
         gross = filled_value
         fee_amount = gross * fee_rate
         net = gross - fee_amount
-        gross_buy = None
-        gross_sell = gross
 
-    for ws in wb.worksheets:
-        if ws.max_row < 5:
-            continue
+    sheet_date = infer_sheet_date(df, side)
+    symbol = df["symbol"].iloc[0] if "symbol" in df.columns and len(df) > 0 else "N/A"
+    base_asset = symbol.replace("USDT", "") if symbol != "N/A" else "BASE"
 
-        payload = {
-            "filled_amount": filled_amount,
-            "filled_value": filled_value,
-            "avg_price": avg_price,
-            "fee_rate": fee_rate,
-            "fee_amount": fee_amount,
-            "net": net,
-            "rebate": rebate,
-            "gross_buy": gross_buy,
-            "gross_sell": gross_sell,
-        }
+    wb = Workbook()
 
-        for lbl, key in SUMMARY_LABELS.items():
-            val = payload.get(key)
-            if val is not None:
-                set_value_next_to_label(ws, lbl, val)
+    # ========== Summary Sheet ==========
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
 
-        for lbl, key in SUMMARY_LABEL_VARIANTS.items():
-            val = payload.get(key)
-            if val is not None:
-                set_value_by_label_fuzzy(ws, lbl, val)
+    ws_sum["A1"] = "Client:"
+    ws_sum["B1"] = client
+    ws_sum["A1"].font = Font(bold=True)
 
+    ws_sum["A3"] = "Summary"
+    ws_sum["A3"].font = Font(bold=True)
 
-def write_totals_in_table(ws: Worksheet, first_data_row: int, colmap: Dict[str, int],
-                          filled_amount: float, filled_value: float, avg_price: float):
-    def set_if_exists(col_name: str, value) -> bool:
-        if col_name in colmap:
-            ws.cell(row=first_data_row, column=colmap[col_name]).value = value
-            return True
-        return False
+    if side == "BUY":
+        ws_sum["A5"] = "Execution summary"
+        ws_sum["B5"] = "Amount"
+        ws_sum["D5"] = "Order summary"
+        ws_sum["A5"].font = Font(bold=True)
+        ws_sum["D5"].font = Font(bold=True)
 
-    ok1 = set_if_exists("sum_fill_amount", filled_amount)
-    ok2 = set_if_exists("sum_fill_value", filled_value)
-    ok3 = set_if_exists("ave_fill_price", avg_price)
+        ws_sum["A6"] = "Filled Amount:"
+        ws_sum["B6"] = filled_amount
+        ws_sum["C6"] = f"({base_asset})"
+        ws_sum["D6"] = "Order type"
+        ws_sum["E6"] = "Buy"
 
-    if not (ok1 or ok2 or ok3):
-        ws.cell(row=first_data_row, column=16).value = filled_amount
-        ws.cell(row=first_data_row, column=17).value = filled_value
-        ws.cell(row=first_data_row, column=18).value = avg_price
+        ws_sum["A7"] = "Filled Value:"
+        ws_sum["B7"] = filled_value
+        ws_sum["C7"] = "(USDT)"
+        ws_sum["D7"] = "Buy order amount"
+        ws_sum["E7"] = gross
+        ws_sum["F7"] = "(USDT)"
+
+        ws_sum["A8"] = "Average Filled Price:"
+        ws_sum["B8"] = avg_price
+        ws_sum["C8"] = f"(USDT/{base_asset})"
+        ws_sum["D8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["E8"] = fee_amount
+        ws_sum["F8"] = "(USDT)"
+
+        ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws_sum["B9"] = fee_amount
+        ws_sum["C9"] = "(USDT)"
+        ws_sum["D9"] = "Net of fee Buy order amount"
+        ws_sum["E9"] = gross - fee_amount
+        ws_sum["F9"] = "(USDT)"
+
+        ws_sum["A10"] = "Settlement Amount:"
+        ws_sum["B10"] = filled_amount
+        ws_sum["C10"] = f"({base_asset})"
+
+        if rebate_usdt and rebate_usdt != 0:
+            ws_sum["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
+
+    else:  # SELL
+        ws_sum["B5"] = "Amount"
+        ws_sum["B5"].font = Font(bold=True)
+
+        ws_sum["A6"] = f"Fill_amount ({base_asset}):"
+        ws_sum["B6"] = filled_amount
+
+        ws_sum["A7"] = "매도 총액:"
+        ws_sum["B7"] = filled_value
+        ws_sum["C7"] = "(USDT)"
+
+        ws_sum["A8"] = "매도 평단:"
+        ws_sum["B8"] = avg_price
+        ws_sum["C8"] = f"(USDT/{base_asset})"
+
+        ws_sum["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
+        ws_sum["B9"] = fee_amount
+        ws_sum["C9"] = "(USDT)"
+
+        ws_sum["A10"] = "정산 금액:"
+        ws_sum["B10"] = net
+        ws_sum["C10"] = "(USDT)"
+
+    # ========== Date Sheet (Trading Data) ==========
+    ws = wb.create_sheet(sheet_date)
+
+    ws["A1"] = "Client:"
+    ws["B1"] = client
+    ws["A1"].font = Font(bold=True)
+
+    ws["A3"] = "Summary"
+    ws["A3"].font = Font(bold=True)
+
+    if side == "BUY":
+        ws["A5"] = "Execution summary"
+        ws["B5"] = "Amount"
+        ws["D5"] = "Order summary"
+        ws["A5"].font = Font(bold=True)
+        ws["D5"].font = Font(bold=True)
+
+        ws["A6"] = "Filled Amount:"
+        ws["B6"] = "=P15"
+        ws["C6"] = f"({base_asset})"
+        ws["D6"] = "Order type"
+        ws["E6"] = "Buy"
+
+        ws["A7"] = "Filled Value:"
+        ws["B7"] = "=Q15"
+        ws["C7"] = "(USDT)"
+        ws["D7"] = "Buy order amount"
+        ws["E7"] = gross
+        ws["F7"] = "(USDT)"
+
+        ws["A8"] = "Average Filled Price:"
+        ws["B8"] = "=R15"
+        ws["C8"] = f"(USDT/{base_asset})"
+        ws["D8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["E8"] = f"=E7*{fee_rate}"
+        ws["F8"] = "(USDT)"
+
+        ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws["B9"] = "=E8"
+        ws["C9"] = "(USDT)"
+        ws["D9"] = "Net of fee Buy order amount"
+        ws["E9"] = "=E7-E8"
+        ws["F9"] = "(USDT)"
+
+        ws["A10"] = "Settlement Amount:"
+        ws["B10"] = "=B6"
+        ws["C10"] = f"({base_asset})"
+
+        if rebate_usdt and rebate_usdt != 0:
+            ws["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
+
+    else:  # SELL
+        ws["B5"] = "Amount"
+        ws["B5"].font = Font(bold=True)
+
+        ws["A6"] = f"Fill_amount ({base_asset}):"
+        ws["B6"] = "=P15"
+
+        ws["A7"] = "매도 총액:"
+        ws["B7"] = "=Q15"
+        ws["C7"] = "(USDT)"
+
+        ws["A8"] = "매도 평단:"
+        ws["B8"] = "=R15"
+        ws["C8"] = f"(USDT/{base_asset})"
+
+        ws["A9"] = f"수수료 ({fee_rate*100:.2f}%)"
+        ws["B9"] = f"=B7*{fee_rate}"
+        ws["C9"] = "(USDT)"
+
+        ws["A10"] = "정산 금액:"
+        ws["B10"] = "=B7-B9"
+        ws["C10"] = "(USDT)"
+
+    # Trading Data section
+    ws["A13"] = "Trading Data"
+    ws["A13"].font = Font(bold=True)
+
+    # Header row 14
+    for col_idx, h in enumerate(TABLE_HEADERS, start=1):
+        ws.cell(row=14, column=col_idx, value=h)
+    style_header(ws, row=14, start_col=1, end_col=len(TABLE_HEADERS))
+    set_col_widths(ws, max_col=len(TABLE_HEADERS))
+
+    # Prepare data with all columns
+    df_out = df.copy()
+    for h in TABLE_HEADERS:
+        if h not in df_out.columns:
+            df_out[h] = None
+    df_out["fill_value"] = df_out["quoteQty"]
+
+    # Write data rows starting at row 15
+    start_row = 15
+    n = len(df_out)
+
+    for i in range(n):
+        r = start_row + i
+        row = df_out.iloc[i]
+        for col_idx, h in enumerate(TABLE_HEADERS, start=1):
+            val = row[h]
+            if pd.isna(val):
+                val = None
+            ws.cell(row=r, column=col_idx, value=val)
+
+    # Totals in P15/Q15/R15
+    ws["P15"] = filled_amount
+    ws["Q15"] = filled_value
+    ws["R15"] = avg_price
+
+    # Table borders
+    border_table(ws, r1=14, r2=start_row + max(n, 1) - 1, c1=1, c2=len(TABLE_HEADERS))
+
+    return wb
 
 
 # -----------------------------
@@ -289,13 +361,13 @@ def write_totals_in_table(ws: Worksheet, first_data_row: int, colmap: Dict[str, 
 # -----------------------------
 st.set_page_config(page_title="Create Invoice", layout="wide")
 st.title("Create Invoice")
-st.caption("체결내역 CSV를 Invoice 템플릿으로 변환")
+st.caption("체결내역 CSV로 Invoice 자동 생성")
 
-# Sidebar - Settings
+# Sidebar
 with st.sidebar:
     st.header("설정")
 
-    # 1. Order Side Selection
+    # 1. Order Side
     st.subheader("1. 주문 유형")
     order_side = st.radio(
         "매수/매도 선택",
@@ -316,14 +388,26 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # Fee rate (only for Binance)
+    # 3. Additional Settings (Binance only)
     if cex_option == "Binance":
+        st.subheader("3. 상세 설정")
+        client = st.text_input("Client", value="")
         fee_rate = st.number_input(
             "Fee rate (예: 0.25% = 0.0025)",
             value=0.0025,
             step=0.0001,
             format="%.6f"
         )
+        if selected_side == "BUY":
+            rebate_usdt = st.number_input(
+                "CEX Rebate (USDT)",
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                help="BUY 주문 시 CEX rebate 금액"
+            )
+        else:
+            rebate_usdt = 0.0
 
 # Main content
 if cex_option == "Others":
@@ -331,15 +415,10 @@ if cex_option == "Others":
     st.stop()
 
 # Binance flow
-st.subheader("파일 업로드")
+st.subheader("체결내역 업로드")
+csv_file = st.file_uploader("체결내역 CSV 파일", type=["csv"])
 
-col1, col2 = st.columns(2)
-with col1:
-    csv_file = st.file_uploader("체결내역 CSV", type=["csv"])
-with col2:
-    template_file = st.file_uploader("Invoice 템플릿 XLSX", type=["xlsx"])
-
-if csv_file and template_file:
+if csv_file:
     # Read CSV
     try:
         df = pd.read_csv(csv_file)
@@ -359,69 +438,53 @@ if csv_file and template_file:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Compute totals
-    filled_amount, filled_value, avg_price = compute_totals(df)
+    # Prepare data
+    df_prepared = ensure_fill_time_columns(df)
+    filled_amount, filled_value, avg_price, total_commission = compute_totals(df_prepared)
 
     # Display summary
-    st.subheader("입력 CSV 요약")
-    a, b, c, d = st.columns(4)
-    a.metric("Rows", f"{len(df):,}")
-    b.metric("Side", selected_side)
-    c.metric("Filled Amount", f"{filled_amount:,.8f}")
-    d.metric("Filled Value", f"{filled_value:,.2f}")
-    st.caption(f"Average Filled Price: {avg_price:,.2f}")
+    st.subheader("체결내역 요약")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("거래 건수", f"{len(df):,}")
+    col2.metric("주문 유형", selected_side)
+    col3.metric("체결 수량", f"{filled_amount:,.8f}")
+    col4.metric("체결 금액", f"{filled_value:,.2f} USDT")
 
-    # Load template
-    try:
-        wb = load_workbook(template_file)
-    except Exception as e:
-        st.error(f"템플릿 XLSX 로드 실패: {e}")
-        st.stop()
+    st.caption(f"평균 체결가: {avg_price:,.2f} USDT | 총 수수료: {total_commission:,.8f}")
 
-    trading_ws = find_sheet_with_trading_data(wb)
-    if trading_ws is None:
-        st.error("Trading Data 시트를 찾지 못했습니다.")
-        st.stop()
+    # Preview
+    with st.expander("체결내역 미리보기", expanded=False):
+        st.dataframe(df.head(30), use_container_width=True)
 
-    st.write(f"선택된 Trading 시트: **{trading_ws.title}**")
+    st.markdown("---")
 
-    # Write trading table
-    first_data_row, colmap = write_trading_table(trading_ws, df)
+    # Generate invoice
+    if st.button("인보이스 생성", type="primary", use_container_width=True):
+        wb = build_invoice_workbook(
+            df_raw=df,
+            client=client,
+            side=selected_side,
+            fee_rate=float(fee_rate),
+            rebate_usdt=float(rebate_usdt) if selected_side == "BUY" else 0.0,
+        )
 
-    # Write totals
-    write_totals_in_table(trading_ws, first_data_row, colmap,
-                          filled_amount, filled_value, avg_price)
+        # Save to bytes
+        out = io.BytesIO()
+        wb.save(out)
+        out.seek(0)
 
-    # Update summaries with user-selected side
-    update_summary_sheets(wb, side=selected_side, fee_rate=float(fee_rate),
-                          filled_amount=filled_amount, filled_value=filled_value, avg_price=avg_price)
+        # Filename
+        symbol = df["symbol"].iloc[0] if df["symbol"].nunique() == 1 else "multi"
+        date_str = datetime.now().strftime("%Y%m%d")
+        file_name = f"invoice_{symbol}_{selected_side.lower()}_{date_str}.xlsx"
 
-    # Output
-    out = io.BytesIO()
-    wb.save(out)
-    out.seek(0)
+        st.success("인보이스 생성 완료!")
+        st.download_button(
+            label="인보이스 XLSX 다운로드",
+            data=out.getvalue(),
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
-    # Filename
-    base_name = f"invoice_binance_{selected_side.lower()}"
-    if "symbol" in df.columns and df["symbol"].nunique() == 1:
-        base_name += f"_{df['symbol'].iloc[0]}"
-    if "fill_time(UTC+8)" in df.columns:
-        try:
-            s = str(df["fill_time(UTC+8)"].iloc[0])
-            base_name += f"_{s[:10].replace('-', '').replace('/', '')}"
-        except Exception:
-            pass
-    base_name += ".xlsx"
-
-    st.success("인보이스 파일 생성 완료!")
-    st.download_button(
-        label="인보이스 XLSX 다운로드",
-        data=out.getvalue(),
-        file_name=base_name,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-
-elif csv_file or template_file:
-    st.info("CSV 파일과 템플릿 XLSX 파일을 모두 업로드해주세요.")
 else:
-    st.info("체결내역 CSV와 Invoice 템플릿 XLSX를 업로드하면 인보이스가 생성됩니다.")
+    st.info("Binance 체결내역 CSV 파일을 업로드하면 인보이스가 자동 생성됩니다.")
