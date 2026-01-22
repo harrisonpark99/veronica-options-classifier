@@ -5,6 +5,7 @@ Generates Excel invoice with same cell positions as template
 """
 
 import io
+import os
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Tuple
@@ -17,10 +18,43 @@ from openpyxl.utils import get_column_letter
 
 
 # -----------------------------
-# Auth Check
+# Page Config
 # -----------------------------
-if "auth_ok" not in st.session_state or not st.session_state.auth_ok:
-    st.warning("로그인이 필요합니다.")
+st.set_page_config(page_title="Create Invoice", layout="wide")
+
+
+# -----------------------------
+# Auth
+# -----------------------------
+APP_PASSWORD = st.secrets.get("APP_PASSWORD", os.environ.get("APP_PASSWORD", ""))
+
+if "auth_ok" not in st.session_state:
+    st.session_state.auth_ok = False
+
+
+def show_login():
+    """Display login form for this page."""
+    st.title("Create Invoice")
+    st.markdown("---")
+    st.markdown("### Login Required")
+
+    pw = st.text_input(
+        "Password",
+        type="password",
+        placeholder="Enter password",
+        key="create_invoice_password"
+    )
+
+    if st.button("Login", type="primary"):
+        if pw == APP_PASSWORD and APP_PASSWORD:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Invalid password or password not configured.")
+
+
+if not st.session_state.auth_ok:
+    show_login()
     st.stop()
 
 
@@ -56,20 +90,17 @@ def ensure_fill_time_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Add fill_time(UTC+8), fill_value columns for template compatibility."""
     out = df.copy()
 
-    # fill_time(UTC+8): convert Binance ms epoch to UTC+8 string
     if "fill_time(UTC+8)" not in out.columns:
         if "time" in out.columns:
             utc = pd.to_datetime(out["time"], unit="ms", utc=True, errors="coerce")
-            utc8 = utc.dt.tz_convert("Asia/Shanghai")  # UTC+8
+            utc8 = utc.dt.tz_convert("Asia/Shanghai")
             out["fill_time(UTC+8)"] = utc8.dt.strftime("%Y-%m-%d %H:%M:%S")
         else:
             out["fill_time(UTC+8)"] = ""
 
-    # fill_value = quoteQty
     if "fill_value" not in out.columns:
         out["fill_value"] = out["quoteQty"]
 
-    # sum columns (filled on first row only)
     for c in ["sum_fill_amount", "sum_fill_value", "ave_fill_price"]:
         if c not in out.columns:
             out[c] = None
@@ -98,8 +129,8 @@ def infer_sheet_date(df: pd.DataFrame, side: str) -> str:
         dt = datetime.now()
 
     if side.upper() == "BUY":
-        return dt.strftime("%y%m%d")  # YYMMDD
-    return dt.strftime("%Y%m%d")      # YYYYMMDD
+        return dt.strftime("%y%m%d")
+    return dt.strftime("%Y%m%d")
 
 
 def set_col_widths(ws, max_col=18):
@@ -145,7 +176,7 @@ def border_cells(ws, cells: list):
         ws[cell].border = border
 
 
-def set_white_borders(ws, max_row=20, max_col=10):
+def set_white_borders(ws, max_row=100, max_col=100):
     """Set white borders on all cells to make sheet look like clean white paper."""
     white = Side(style="thin", color="FFFFFF")
     white_border = Border(left=white, right=white, top=white, bottom=white)
@@ -157,6 +188,26 @@ def set_white_borders(ws, max_row=20, max_col=10):
 def truncate_usdt(value: float) -> float:
     """Truncate USDT value to 2 decimal places (cut off, not round)."""
     return math.floor(value * 100) / 100
+
+
+def autofit_columns(ws, min_width: float = 8, max_width: float = 45):
+    """
+    Auto-fit column widths based on string length of cell values.
+    Keeps widths within [min_width, max_width].
+    """
+    for col_cells in ws.columns:
+        col_letter = get_column_letter(col_cells[0].column)
+        max_len = 0
+        for cell in col_cells:
+            v = cell.value
+            if v is None:
+                continue
+            if isinstance(v, float):
+                s = f"{v:.8f}".rstrip("0").rstrip(".")
+            else:
+                s = str(v)
+            max_len = max(max_len, len(s))
+        ws.column_dimensions[col_letter].width = min(max_width, max(min_width, max_len + 2))
 
 
 def build_invoice_workbook(
@@ -189,12 +240,14 @@ def build_invoice_workbook(
 
     wb = Workbook()
 
-    # ========== Summary Sheet ==========
+    # =========================================================
+    # Summary Sheet
+    # =========================================================
     ws_sum = wb.active
     ws_sum.title = "Summary"
 
-    # Set white borders first (clean white paper look)
-    set_white_borders(ws_sum, max_row=50, max_col=20)
+    # Clean white paper look (100 rows x 100 cols)
+    set_white_borders(ws_sum, max_row=100, max_col=100)
 
     ws_sum["A1"] = "Client:"
     ws_sum["B1"] = client
@@ -203,39 +256,44 @@ def build_invoice_workbook(
     ws_sum["A3"] = "Summary"
     ws_sum["A3"].font = Font(bold=True)
 
-    if side == "BUY":
-        ws_sum["A5"] = "Execution summary"
-        ws_sum["B5"] = "Amount"
-        ws_sum["D5"] = "Order summary"
-        ws_sum["A5"].font = Font(bold=True)
-        ws_sum["D5"].font = Font(bold=True)
+    # Layout: Execution summary (A~C), gap at D, Order summary (E~G)
+    ws_sum["A5"] = "Execution summary"
+    ws_sum["B5"] = "Amount"
+    ws_sum["E5"] = "Order summary"
+    ws_sum["A5"].font = Font(bold=True)
+    ws_sum["E5"].font = Font(bold=True)
 
+    if side == "BUY":
         ws_sum["A6"] = "Filled Amount:"
         ws_sum["B6"] = filled_amount
         ws_sum["C6"] = f"({base_asset})"
-        ws_sum["D6"] = "Order type"
-        ws_sum["E6"] = "Buy"
+
+        ws_sum["E6"] = "Order type"
+        ws_sum["F6"] = "Buy"
 
         ws_sum["A7"] = "Filled Value:"
         ws_sum["B7"] = truncate_usdt(filled_value)
         ws_sum["C7"] = "(USDT)"
-        ws_sum["D7"] = "Buy order amount"
-        ws_sum["E7"] = truncate_usdt(gross)
-        ws_sum["F7"] = "(USDT)"
+
+        ws_sum["E7"] = "Buy order amount"
+        ws_sum["F7"] = truncate_usdt(gross)
+        ws_sum["G7"] = "(USDT)"
 
         ws_sum["A8"] = "Average Filled Price:"
         ws_sum["B8"] = truncate_usdt(avg_price)
         ws_sum["C8"] = f"(USDT/{base_asset})"
-        ws_sum["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws_sum["E8"] = truncate_usdt(fee_amount)
-        ws_sum["F8"] = "(USDT)"
+
+        ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["F8"] = truncate_usdt(fee_amount)
+        ws_sum["G8"] = "(USDT)"
 
         ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
         ws_sum["B9"] = truncate_usdt(fee_amount)
         ws_sum["C9"] = "(USDT)"
-        ws_sum["D9"] = "Net of fee Buy order amount"
-        ws_sum["E9"] = truncate_usdt(gross - fee_amount)
-        ws_sum["F9"] = "(USDT)"
+
+        ws_sum["E9"] = "Net of fee Buy order amount"
+        ws_sum["F9"] = truncate_usdt(gross - fee_amount)
+        ws_sum["G9"] = "(USDT)"
 
         ws_sum["A10"] = "Settlement Amount:"
         ws_sum["B10"] = filled_amount
@@ -244,59 +302,64 @@ def build_invoice_workbook(
         if rebate_usdt and rebate_usdt != 0:
             ws_sum["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
 
-        # Apply borders to data cells
-        border_cells(ws_sum, ["A6", "B6", "C6", "D6", "E6",
-                              "A7", "B7", "C7", "D7", "E7", "F7",
-                              "A8", "B8", "C8", "D8", "E8", "F8",
-                              "A9", "B9", "C9", "D9", "E9", "F9",
-                              "A10", "B10", "C10"])
+        border_cells(ws_sum, [
+            "A6", "B6", "E6", "F6",
+            "A7", "B7", "E7", "F7",
+            "A8", "B8", "E8", "F8",
+            "A9", "B9", "E9", "F9",
+            "A10", "B10",
+        ])
 
     else:  # SELL
-        ws_sum["A5"] = "Execution summary"
-        ws_sum["B5"] = "Amount"
-        ws_sum["D5"] = "Order summary"
-        ws_sum["A5"].font = Font(bold=True)
-        ws_sum["D5"].font = Font(bold=True)
-
         ws_sum["A6"] = "Filled Amount:"
         ws_sum["B6"] = filled_amount
         ws_sum["C6"] = f"({base_asset})"
-        ws_sum["D6"] = "Order type"
-        ws_sum["E6"] = "Sell"
+
+        ws_sum["E6"] = "Order type"
+        ws_sum["F6"] = "Sell"
 
         ws_sum["A7"] = "Filled Value:"
         ws_sum["B7"] = truncate_usdt(filled_value)
         ws_sum["C7"] = "(USDT)"
-        ws_sum["D7"] = "Sell order amount"
-        ws_sum["E7"] = truncate_usdt(gross)
-        ws_sum["F7"] = "(USDT)"
+
+        ws_sum["E7"] = "Sell order amount"
+        ws_sum["F7"] = truncate_usdt(gross)
+        ws_sum["G7"] = "(USDT)"
 
         ws_sum["A8"] = "Average Filled Price:"
         ws_sum["B8"] = truncate_usdt(avg_price)
         ws_sum["C8"] = f"(USDT/{base_asset})"
-        ws_sum["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws_sum["E8"] = truncate_usdt(fee_amount)
-        ws_sum["F8"] = "(USDT)"
+
+        ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["F8"] = truncate_usdt(fee_amount)
+        ws_sum["G8"] = "(USDT)"
 
         ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
         ws_sum["B9"] = truncate_usdt(fee_amount)
         ws_sum["C9"] = "(USDT)"
-        ws_sum["D9"] = "Net of fee Sell order amount"
-        ws_sum["E9"] = truncate_usdt(net)
-        ws_sum["F9"] = "(USDT)"
+
+        ws_sum["E9"] = "Net of fee Sell order amount"
+        ws_sum["F9"] = truncate_usdt(net)
+        ws_sum["G9"] = "(USDT)"
 
         ws_sum["A10"] = "Settlement Amount:"
         ws_sum["B10"] = truncate_usdt(net)
         ws_sum["C10"] = "(USDT)"
 
-        # Apply borders to data cells
-        border_cells(ws_sum, ["A6", "B6", "C6", "D6", "E6",
-                              "A7", "B7", "C7", "D7", "E7", "F7",
-                              "A8", "B8", "C8", "D8", "E8", "F8",
-                              "A9", "B9", "C9", "D9", "E9", "F9",
-                              "A10", "B10", "C10"])
+        border_cells(ws_sum, [
+            "A6", "B6", "E6", "F6",
+            "A7", "B7", "E7", "F7",
+            "A8", "B8", "E8", "F8",
+            "A9", "B9", "E9", "F9",
+            "A10", "B10",
+        ])
 
-    # ========== Date Sheet (Trading Data) ==========
+    # Auto-fit Summary sheet columns
+    autofit_columns(ws_sum, min_width=10, max_width=45)
+
+    # =========================================================
+    # Date Sheet (Trading Data)
+    # =========================================================
     ws = wb.create_sheet(sheet_date)
 
     ws["A1"] = "Client:"
@@ -306,39 +369,43 @@ def build_invoice_workbook(
     ws["A3"] = "Summary"
     ws["A3"].font = Font(bold=True)
 
-    if side == "BUY":
-        ws["A5"] = "Execution summary"
-        ws["B5"] = "Amount"
-        ws["D5"] = "Order summary"
-        ws["A5"].font = Font(bold=True)
-        ws["D5"].font = Font(bold=True)
+    ws["A5"] = "Execution summary"
+    ws["B5"] = "Amount"
+    ws["E5"] = "Order summary"
+    ws["A5"].font = Font(bold=True)
+    ws["E5"].font = Font(bold=True)
 
+    if side == "BUY":
         ws["A6"] = "Filled Amount:"
         ws["B6"] = "=P15"
         ws["C6"] = f"({base_asset})"
-        ws["D6"] = "Order type"
-        ws["E6"] = "Buy"
+
+        ws["E6"] = "Order type"
+        ws["F6"] = "Buy"
 
         ws["A7"] = "Filled Value:"
         ws["B7"] = "=TRUNC(Q15,2)"
         ws["C7"] = "(USDT)"
-        ws["D7"] = "Buy order amount"
-        ws["E7"] = truncate_usdt(gross)
-        ws["F7"] = "(USDT)"
+
+        ws["E7"] = "Buy order amount"
+        ws["F7"] = truncate_usdt(gross)
+        ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
         ws["B8"] = "=TRUNC(R15,2)"
         ws["C8"] = f"(USDT/{base_asset})"
-        ws["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws["E8"] = f"=TRUNC(E7*{fee_rate},2)"
-        ws["F8"] = "(USDT)"
+
+        ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["G8"] = "(USDT)"
 
         ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
-        ws["B9"] = "=E8"
+        ws["B9"] = "=F8"
         ws["C9"] = "(USDT)"
-        ws["D9"] = "Net of fee Buy order amount"
-        ws["E9"] = "=TRUNC(E7-E8,2)"
-        ws["F9"] = "(USDT)"
+
+        ws["E9"] = "Net of fee Buy order amount"
+        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["G9"] = "(USDT)"
 
         ws["A10"] = "Settlement Amount:"
         ws["B10"] = "=B6"
@@ -347,59 +414,64 @@ def build_invoice_workbook(
         if rebate_usdt and rebate_usdt != 0:
             ws["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
 
-        # Apply borders to data cells
-        border_cells(ws, ["A6", "B6", "C6", "D6", "E6",
-                         "A7", "B7", "C7", "D7", "E7", "F7",
-                         "A8", "B8", "C8", "D8", "E8", "F8",
-                         "A9", "B9", "C9", "D9", "E9", "F9",
-                         "A10", "B10", "C10"])
+        border_cells(ws, [
+            "A6", "B6", "E6", "F6",
+            "A7", "B7", "E7", "F7",
+            "A8", "B8", "E8", "F8",
+            "A9", "B9", "E9", "F9",
+            "A10", "B10",
+        ])
 
     else:  # SELL
-        ws["A5"] = "Execution summary"
-        ws["B5"] = "Amount"
-        ws["D5"] = "Order summary"
-        ws["A5"].font = Font(bold=True)
-        ws["D5"].font = Font(bold=True)
-
         ws["A6"] = "Filled Amount:"
         ws["B6"] = "=P15"
         ws["C6"] = f"({base_asset})"
-        ws["D6"] = "Order type"
-        ws["E6"] = "Sell"
+
+        ws["E6"] = "Order type"
+        ws["F6"] = "Sell"
 
         ws["A7"] = "Filled Value:"
         ws["B7"] = "=TRUNC(Q15,2)"
         ws["C7"] = "(USDT)"
-        ws["D7"] = "Sell order amount"
-        ws["E7"] = truncate_usdt(gross)
-        ws["F7"] = "(USDT)"
+
+        ws["E7"] = "Sell order amount"
+        ws["F7"] = truncate_usdt(gross)
+        ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
         ws["B8"] = "=TRUNC(R15,2)"
         ws["C8"] = f"(USDT/{base_asset})"
-        ws["D8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws["E8"] = f"=TRUNC(E7*{fee_rate},2)"
-        ws["F8"] = "(USDT)"
+
+        ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["G8"] = "(USDT)"
 
         ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
-        ws["B9"] = "=E8"
+        ws["B9"] = "=F8"
         ws["C9"] = "(USDT)"
-        ws["D9"] = "Net of fee Sell order amount"
-        ws["E9"] = "=TRUNC(E7-E8,2)"
-        ws["F9"] = "(USDT)"
+
+        ws["E9"] = "Net of fee Sell order amount"
+        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["G9"] = "(USDT)"
 
         ws["A10"] = "Settlement Amount:"
-        ws["B10"] = "=E9"
+        ws["B10"] = "=F9"
         ws["C10"] = "(USDT)"
 
-        # Apply borders to data cells
-        border_cells(ws, ["A6", "B6", "C6", "D6", "E6",
-                         "A7", "B7", "C7", "D7", "E7", "F7",
-                         "A8", "B8", "C8", "D8", "E8", "F8",
-                         "A9", "B9", "C9", "D9", "E9", "F9",
-                         "A10", "B10", "C10"])
+        border_cells(ws, [
+            "A6", "B6", "E6", "F6",
+            "A7", "B7", "E7", "F7",
+            "A8", "B8", "E8", "F8",
+            "A9", "B9", "E9", "F9",
+            "A10", "B10",
+        ])
 
+    # Auto-fit for summary area
+    autofit_columns(ws, min_width=10, max_width=45)
+
+    # =========================================================
     # Trading Data section
+    # =========================================================
     ws["A13"] = "Trading Data"
     ws["A13"].font = Font(bold=True)
 
@@ -407,9 +479,11 @@ def build_invoice_workbook(
     for col_idx, h in enumerate(TABLE_HEADERS, start=1):
         ws.cell(row=14, column=col_idx, value=h)
     style_header(ws, row=14, start_col=1, end_col=len(TABLE_HEADERS))
+
+    # Set table column widths
     set_col_widths(ws, max_col=len(TABLE_HEADERS))
 
-    # Prepare data with all columns
+    # Prepare data
     df_out = df.copy()
     for h in TABLE_HEADERS:
         if h not in df_out.columns:
@@ -443,29 +517,28 @@ def build_invoice_workbook(
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="Create Invoice", layout="wide")
 st.title("Create Invoice")
-st.caption("체결내역 CSV로 Invoice 자동 생성")
+st.caption("Generate invoice from trade execution CSV")
 
 # Sidebar
 with st.sidebar:
-    st.header("설정")
+    st.header("Settings")
 
     # 1. Order Side
-    st.subheader("1. 주문 유형")
+    st.subheader("1. Order Type")
     order_side = st.radio(
-        "매수/매도 선택",
-        options=["BUY (매수)", "SELL (매도)"],
+        "Select BUY/SELL",
+        options=["BUY", "SELL"],
         horizontal=True
     )
-    selected_side = "BUY" if "BUY" in order_side else "SELL"
+    selected_side = order_side
 
     st.markdown("---")
 
     # 2. CEX Selection
-    st.subheader("2. 거래소 선택")
+    st.subheader("2. Exchange")
     cex_option = st.radio(
-        "CEX 선택",
+        "Select CEX",
         options=["Binance", "Others"],
         horizontal=True
     )
@@ -474,10 +547,10 @@ with st.sidebar:
 
     # 3. Additional Settings (Binance only)
     if cex_option == "Binance":
-        st.subheader("3. 상세 설정")
+        st.subheader("3. Details")
         client = st.text_input("Client", value="")
         fee_rate = st.number_input(
-            "Fee rate (예: 0.25% = 0.0025)",
+            "Fee rate (e.g. 0.25% = 0.0025)",
             value=0.0025,
             step=0.0001,
             format="%.6f"
@@ -488,62 +561,55 @@ with st.sidebar:
                 value=0.0,
                 step=0.01,
                 format="%.2f",
-                help="BUY 주문 시 CEX rebate 금액"
+                help="CEX rebate amount for BUY orders"
             )
         else:
             rebate_usdt = 0.0
 
 # Main content
 if cex_option == "Others":
-    st.warning("현재 Binance만 지원됩니다. 다른 거래소 지원은 준비 중입니다.")
+    st.warning("Currently only Binance is supported. Other exchanges coming soon.")
     st.stop()
 
 # Binance flow
-st.subheader("체결내역 업로드")
-csv_file = st.file_uploader("체결내역 CSV 파일", type=["csv"])
+st.subheader("Upload Trade History")
+csv_file = st.file_uploader("Trade history CSV file", type=["csv"])
 
 if csv_file:
-    # Read CSV
     try:
         df = pd.read_csv(csv_file)
     except Exception as e:
-        st.error(f"CSV 읽기 실패: {e}")
+        st.error(f"Failed to read CSV: {e}")
         st.stop()
 
-    # Validate columns
     df.columns = [c.strip() for c in df.columns]
     missing = [c for c in BINANCE_REQUIRED_COLS if c not in df.columns]
     if missing:
-        st.error(f"CSV 필수 컬럼이 없습니다 (Binance 형식): {missing}")
+        st.error(f"Missing required columns (Binance format): {missing}")
         st.stop()
 
-    # Convert numeric columns
     for col in BINANCE_NUMERIC_COLS:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Prepare data
     df_prepared = ensure_fill_time_columns(df)
     filled_amount, filled_value, avg_price, total_commission = compute_totals(df_prepared)
 
-    # Display summary
-    st.subheader("체결내역 요약")
+    st.subheader("Trade Summary")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("거래 건수", f"{len(df):,}")
-    col2.metric("주문 유형", selected_side)
-    col3.metric("체결 수량", f"{filled_amount:,.8f}")
-    col4.metric("체결 금액", f"{filled_value:,.2f} USDT")
+    col1.metric("Rows", f"{len(df):,}")
+    col2.metric("Side", selected_side)
+    col3.metric("Filled Amount", f"{filled_amount:,.8f}")
+    col4.metric("Filled Value", f"{filled_value:,.2f} USDT")
 
-    st.caption(f"평균 체결가: {avg_price:,.2f} USDT | 총 수수료: {total_commission:,.8f}")
+    st.caption(f"Average Price: {avg_price:,.2f} USDT | Total Commission: {total_commission:,.8f}")
 
-    # Preview
-    with st.expander("체결내역 미리보기", expanded=False):
+    with st.expander("Preview Trade History", expanded=False):
         st.dataframe(df.head(30), use_container_width=True)
 
     st.markdown("---")
 
-    # Generate invoice
-    if st.button("인보이스 생성", type="primary", use_container_width=True):
+    if st.button("Generate Invoice", type="primary", use_container_width=True):
         wb = build_invoice_workbook(
             df_raw=df,
             client=client,
@@ -552,23 +618,21 @@ if csv_file:
             rebate_usdt=float(rebate_usdt) if selected_side == "BUY" else 0.0,
         )
 
-        # Save to bytes
         out = io.BytesIO()
         wb.save(out)
         out.seek(0)
 
-        # Filename
         symbol = df["symbol"].iloc[0] if df["symbol"].nunique() == 1 else "multi"
         date_str = datetime.now().strftime("%Y%m%d")
         file_name = f"invoice_{symbol}_{selected_side.lower()}_{date_str}.xlsx"
 
-        st.success("인보이스 생성 완료!")
+        st.success("Invoice generated successfully!")
         st.download_button(
-            label="인보이스 XLSX 다운로드",
+            label="Download Invoice XLSX",
             data=out.getvalue(),
             file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
 else:
-    st.info("Binance 체결내역 CSV 파일을 업로드하면 인보이스가 자동 생성됩니다.")
+    st.info("Upload a Binance trade history CSV file to generate an invoice.")
