@@ -11,3 +11,4 @@ pytz>=2024.1
 backports.zoneinfo; python_version<"3.9"
 openpyxl>=3.1.5
 plotly>=5.18.0
+reportlab>=4.0.0
