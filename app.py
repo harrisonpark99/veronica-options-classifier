@@ -88,7 +88,7 @@ def show_login_page():
         st.markdown("### 제공 기능")
 
         col_f1, col_f2, col_f3 = st.columns(3)
-        col_f4, col_f5, _ = st.columns(3)
+        col_f4, col_f5, col_f6 = st.columns(3)
 
         with col_f1:
             st.markdown(
@@ -145,6 +145,17 @@ def show_login_page():
                 """
             )
 
+        with col_f6:
+            st.markdown(
+                """
+                **Ledger Tool**
+                - 클라이언트 렛저 관리
+                - Coupon / Reclass / AES Trade
+                - Undo (Reversal) 지원
+                - Excel / PDF 내보내기
+                """
+            )
+
         st.markdown("---")
         st.caption("문의: 관리자에게 연락하세요")
 
@@ -188,6 +199,7 @@ def show_dashboard():
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
+        st.page_link("pages/6_Ledger_Tool.py", label="Ledger Tool", icon="📒")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -197,7 +209,7 @@ def show_dashboard():
 
     col1, col2 = st.columns(2)
     col3, col4 = st.columns(2)
-    col5, _ = st.columns(2)
+    col5, col6 = st.columns(2)
 
     with col1:
         st.markdown("### 📊 Option Classifier")
@@ -278,6 +290,22 @@ def show_dashboard():
         )
         if st.button("Create Invoice 열기", key="open_create_invoice", use_container_width=True):
             st.switch_page("pages/5_Create_Invoice.py")
+
+    with col6:
+        st.markdown("### 📒 Ledger Tool")
+        st.markdown(
+            """
+            클라이언트 렛저를 관리하고 추적합니다.
+
+            **주요 기능:**
+            - Coupon Received / Reclass / AES Trade 기록
+            - Asset × Bucket 요약 대시보드
+            - Undo (Reversal) 기능
+            - Excel / PDF 내보내기
+            """
+        )
+        if st.button("Ledger Tool 열기", key="open_ledger_tool", use_container_width=True):
+            st.switch_page("pages/6_Ledger_Tool.py")
 
     st.markdown("---")
 

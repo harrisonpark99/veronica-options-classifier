@@ -20,6 +20,12 @@ from io import BytesIO
 import pandas as pd
 import streamlit as st
 
+# ================== Auth Check ==================
+if "auth_ok" not in st.session_state or not st.session_state.auth_ok:
+    st.warning("로그인이 필요합니다.")
+    st.switch_page("app.py")
+    st.stop()
+
 # PDF (reportlab)
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -453,7 +459,6 @@ def df_to_pdf_bytes(df_filtered: pd.DataFrame, summary: pd.DataFrame, filters: d
 # -----------------------------
 # Streamlit UI
 # -----------------------------
-st.set_page_config(page_title="Ledger Tool", layout="wide")
 init_db()
 
 st.title("Ledger Tool (SQLite)")
