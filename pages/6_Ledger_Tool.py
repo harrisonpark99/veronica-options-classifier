@@ -324,6 +324,72 @@ def reverse_group(group_id: str, created_by=None) -> str:
     insert_entries(rows)
     return new_gid
 
+def import_csv(csv_df: pd.DataFrame, account: str, created_by=None) -> tuple[int, str]:
+    """
+    Import ledger entries from CSV.
+    Expected columns: Date, Type, ccy, amount, remarks
+    Maps to: ts, bucket, asset, amount, memo
+    Returns: (count of imported rows, group_id)
+    """
+    gid = make_gid("csv")
+    rows = []
+
+    for _, r in csv_df.iterrows():
+        # Parse date - handle various formats
+        date_val = r.get("Date", "")
+        if pd.isna(date_val) or str(date_val).strip() == "":
+            continue
+
+        # Convert date to ISO format
+        try:
+            if isinstance(date_val, str):
+                # Try parsing common formats
+                for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%d/%m/%Y"]:
+                    try:
+                        parsed = datetime.strptime(date_val.strip(), fmt)
+                        ts = parsed.strftime("%Y-%m-%dT00:00:00Z")
+                        break
+                    except ValueError:
+                        continue
+                else:
+                    ts = normalize_iso(date_val)
+            else:
+                # Assume it's a datetime object
+                ts = pd.Timestamp(date_val).strftime("%Y-%m-%dT00:00:00Z")
+        except Exception:
+            ts = utc_now_iso()
+
+        bucket = str(r.get("Type", "")).strip() or "Unknown"
+        asset = str(r.get("ccy", "")).strip() or "Unknown"
+
+        try:
+            amount = float(r.get("amount", 0))
+        except (ValueError, TypeError):
+            amount = 0.0
+
+        memo = str(r.get("remarks", "")).strip() if pd.notna(r.get("remarks")) else None
+
+        rows.append({
+            "ts": ts,
+            "account": account,
+            "asset": asset,
+            "bucket": bucket,
+            "amount": amount,
+            "memo": memo,
+            "ref": None,
+            "group_id": gid,
+            "group_type": "csv_import",
+            "leg": "import",
+            "created_by": created_by,
+            "is_reversal": 0,
+            "reversed_group_id": None
+        })
+
+    if rows:
+        insert_entries(rows)
+
+    return len(rows), gid
+
 # -----------------------------
 # Summary + Export
 # -----------------------------
@@ -532,7 +598,7 @@ elif page == "Ledger":
     st.subheader("Ledger (filtered)")
 
     # Quick Add buttons
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.button("+ Coupon Received", use_container_width=True):
             st.session_state["open_quick"] = "coupon"
@@ -542,6 +608,9 @@ elif page == "Ledger":
     with c3:
         if st.button("+ AES Trade Done", use_container_width=True):
             st.session_state["open_quick"] = "aes"
+    with c4:
+        if st.button("📤 CSV Upload", use_container_width=True):
+            st.session_state["open_quick"] = "csv_upload"
 
     quick = st.session_state.get("open_quick")
 
@@ -618,6 +687,42 @@ elif page == "Ledger":
                 memo=memo or None
             )
             st.success(f"Posted. group_id={gid}")
+            st.session_state["open_quick"] = None
+            st.rerun()
+
+    elif quick == "csv_upload":
+        st.markdown("#### CSV Upload (Bulk Import)")
+        st.caption("CSV 컬럼: Date, Type, ccy, amount, remarks")
+
+        uploaded_file = st.file_uploader("CSV 파일 선택", type=["csv"], key="csv_uploader")
+        account_for_import = st.selectbox("Import할 Account 선택", options=accounts_all, index=0, key="csv_account")
+
+        if uploaded_file is not None:
+            try:
+                csv_df = pd.read_csv(uploaded_file)
+                st.markdown("**Preview (first 10 rows):**")
+                st.dataframe(csv_df.head(10), use_container_width=True)
+                st.caption(f"Total rows in CSV: {len(csv_df)}")
+
+                # Check required columns
+                required_cols = ["Date", "Type", "ccy", "amount"]
+                missing_cols = [c for c in required_cols if c not in csv_df.columns]
+
+                if missing_cols:
+                    st.error(f"필수 컬럼 누락: {missing_cols}")
+                else:
+                    if st.button("Import CSV", type="primary", use_container_width=True):
+                        try:
+                            count, gid = import_csv(csv_df, account_for_import)
+                            st.success(f"Imported {count} rows. group_id={gid}")
+                            st.session_state["open_quick"] = None
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Import 실패: {e}")
+            except Exception as e:
+                st.error(f"CSV 읽기 실패: {e}")
+
+        if st.button("Cancel", use_container_width=True):
             st.session_state["open_quick"] = None
             st.rerun()
 
