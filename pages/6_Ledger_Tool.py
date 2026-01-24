@@ -363,7 +363,11 @@ def import_csv(csv_df: pd.DataFrame, account: str, created_by=None) -> tuple[int
         asset = str(r.get("ccy", "")).strip() or "Unknown"
 
         try:
-            amount = float(r.get("amount", 0))
+            amt_val = r.get("amount", 0)
+            if pd.isna(amt_val) or str(amt_val).strip() == "":
+                amount = 0.0
+            else:
+                amount = float(amt_val)
         except (ValueError, TypeError):
             amount = 0.0
 
