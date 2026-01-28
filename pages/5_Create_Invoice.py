@@ -272,7 +272,7 @@ def build_invoice_workbook(
         ws_sum["F6"] = "Buy"
 
         ws_sum["A7"] = "Filled Value:"
-        ws_sum["B7"] = truncate_usdt(filled_value)
+        ws_sum["B7"] = filled_value
         ws_sum["C7"] = "(USDT)"
 
         ws_sum["E7"] = "Buy order amount"
@@ -280,7 +280,7 @@ def build_invoice_workbook(
         ws_sum["G7"] = "(USDT)"
 
         ws_sum["A8"] = "Average Filled Price:"
-        ws_sum["B8"] = truncate_usdt(avg_price)
+        ws_sum["B8"] = avg_price
         ws_sum["C8"] = f"(USDT/{base_asset})"
 
         ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
@@ -319,7 +319,7 @@ def build_invoice_workbook(
         ws_sum["F6"] = "Sell"
 
         ws_sum["A7"] = "Filled Value:"
-        ws_sum["B7"] = truncate_usdt(filled_value)
+        ws_sum["B7"] = filled_value
         ws_sum["C7"] = "(USDT)"
 
         ws_sum["E7"] = "Sell order amount"
@@ -327,7 +327,7 @@ def build_invoice_workbook(
         ws_sum["G7"] = "(USDT)"
 
         ws_sum["A8"] = "Average Filled Price:"
-        ws_sum["B8"] = truncate_usdt(avg_price)
+        ws_sum["B8"] = avg_price
         ws_sum["C8"] = f"(USDT/{base_asset})"
 
         ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
@@ -505,8 +505,8 @@ def build_invoice_workbook(
 
     # Totals in P15/Q15/R15
     ws["P15"] = filled_amount
-    ws["Q15"] = truncate_usdt(filled_value)
-    ws["R15"] = truncate_usdt(avg_price)
+    ws["Q15"] = filled_value
+    ws["R15"] = avg_price
 
     # Table borders
     border_table(ws, r1=14, r2=start_row + max(n, 1) - 1, c1=1, c2=len(TABLE_HEADERS))
