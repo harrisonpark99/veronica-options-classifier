@@ -384,15 +384,15 @@ def build_invoice_workbook(
         ws["F6"] = "Buy"
 
         ws["A7"] = "Filled Value:"
-        ws["B7"] = "=TRUNC(Q15,2)"
+        ws["B7"] = "=Q15"
         ws["C7"] = "(USDT)"
 
         ws["E7"] = "Buy order amount"
-        ws["F7"] = truncate_usdt(gross)
+        ws["F7"] = "=Q15"
         ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
-        ws["B8"] = "=TRUNC(R15,2)"
+        ws["B8"] = "=R15"
         ws["C8"] = f"(USDT/{base_asset})"
 
         ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
@@ -431,15 +431,15 @@ def build_invoice_workbook(
         ws["F6"] = "Sell"
 
         ws["A7"] = "Filled Value:"
-        ws["B7"] = "=TRUNC(Q15,2)"
+        ws["B7"] = "=Q15"
         ws["C7"] = "(USDT)"
 
         ws["E7"] = "Sell order amount"
-        ws["F7"] = truncate_usdt(gross)
+        ws["F7"] = "=Q15"
         ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
-        ws["B8"] = "=TRUNC(R15,2)"
+        ws["B8"] = "=R15"
         ws["C8"] = f"(USDT/{base_asset})"
 
         ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
