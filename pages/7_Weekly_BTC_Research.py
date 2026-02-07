@@ -268,7 +268,7 @@ def _vol_regime(fv, lr_mean):
 
 
 def _market_sentiment(pct_chg, rv7, rv30, vol_regime):
-    """Return (sentiment_label, short_narrative) based on market conditions."""
+    """Return (sentiment_label, vol_direction) based on market conditions."""
     if pct_chg < -5:
         tone = "bearish"
     elif pct_chg < -1:
@@ -279,35 +279,239 @@ def _market_sentiment(pct_chg, rv7, rv30, vol_regime):
         tone = "constructive"
     else:
         tone = "neutral"
-
     vol_dir = "rising" if (rv30 > 0 and rv7 / rv30 > 1.10) else "falling" if (rv30 > 0 and rv7 / rv30 < 0.90) else "stable"
+    return tone, vol_dir
 
-    narratives = {
-        ("bearish", "rising"): "Markets under pressure as volatility spikes. Key support levels are being tested — caution warranted but structured products can capitalize on elevated premiums.",
-        ("bearish", "stable"): "Digital assets continue to slide with sentiment turning negative. Support levels are trying to stem losses — a good environment for coupon-generating strategies.",
-        ("bearish", "falling"): "Selling pressure persists but volatility is compressing. Consider locking in current premium levels before vol normalizes further.",
-        ("cautious", "rising"): "Markets trading lower with uptick in volatility. Elevated premiums offer attractive coupon opportunities for structured products.",
-        ("cautious", "stable"): "Slight weakness across digital assets with vol holding steady. Covered call structures look compelling at current levels.",
-        ("cautious", "falling"): "Mild pullback with declining vol. Tighter strikes can capture reasonable yield as the market consolidates.",
-        ("neutral", "rising"): "Range-bound price action with vol ticking higher. Premium sellers benefit — structured products offer yield pick-up over simple spot holdings.",
-        ("neutral", "stable"): "Quiet markets with stable volatility. Consistent coupon generation via covered calls remains the play.",
-        ("neutral", "falling"): "Calm markets and declining vol. Consider shorter-dated structures before premiums compress further.",
-        ("constructive", "rising"): "Positive momentum with rising volatility — juicy premiums available. Wider strikes recommended for upside participation + coupon.",
-        ("constructive", "stable"): "Markets grinding higher with steady vol. Good conditions for call overwriting strategies.",
-        ("constructive", "falling"): "Bullish drift with vol coming in. Lock in yield via shorter expiries while premiums remain.",
-        ("bullish", "rising"): "Strong rally with vol elevated. Use wider OTM strikes to capture coupon while leaving room for continued upside.",
-        ("bullish", "stable"): "Bullish momentum continues. Wider strikes ensure participation in the move while still generating income.",
-        ("bullish", "falling"): "Strong move higher with vol declining. Premium levels still attractive — act before further vol compression.",
-    }
-    narrative = narratives.get((tone, vol_dir), "Markets moving — reach out for tailored structures.")
-    return tone, narrative
+
+def _narrative_en(spot, btc_df, vol_data, pct_chg, rv7, rv30, regime):
+    """Goldman-style English market narrative with data-driven insights."""
+    tone, vol_dir = _market_sentiment(pct_chg, rv7, rv30, regime)
+
+    high_30d = btc_df["high"].tail(30).max()
+    low_30d = btc_df["low"].tail(30).min()
+    high_90d = btc_df["high"].tail(90).max()
+    low_90d = btc_df["low"].tail(90).min()
+    ath = btc_df["high"].max()
+    fv = vol_data["forecast_rv"]
+    lr = vol_data["long_run_mean"]
+    range_pct = (high_30d - low_30d) / spot * 100 if spot > 0 else 0
+    dist_from_ath = (ath - spot) / ath * 100 if ath > 0 else 0
+    vol_ratio = rv7 / rv30 if rv30 > 0 else 1.0
+
+    # Paragraph 1 — Market Overview
+    if tone == "bearish":
+        p1 = (
+            f"Digital assets remain under significant pressure this week, "
+            f"with BTC declining {abs(pct_chg):.1f}% to trade around ${spot:,.0f}. "
+            f"The sell-off has pushed prices toward the lower bound of the 30-day range "
+            f"(${low_30d:,.0f}–${high_30d:,.0f}), and we note that the 90-day low of "
+            f"${low_90d:,.0f} represents a critical support level to watch. "
+            f"Risk sentiment has deteriorated meaningfully, and flows remain skewed to the downside."
+        )
+    elif tone == "cautious":
+        p1 = (
+            f"BTC is trading modestly lower on the week, down {abs(pct_chg):.1f}% to ${spot:,.0f}, "
+            f"within a well-established 30-day range of ${low_30d:,.0f}–${high_30d:,.0f}. "
+            f"Market sentiment has turned slightly cautious amid mixed macro signals. "
+            f"The {range_pct:.0f}% trading range suggests the market is searching for direction, "
+            f"with the 90-day low at ${low_90d:,.0f} providing a backstop."
+        )
+    elif tone == "neutral":
+        p1 = (
+            f"BTC continues to trade in a tight range around ${spot:,.0f}, "
+            f"largely unchanged on the week ({pct_chg:+.1f}%). "
+            f"The 30-day range has compressed to ${low_30d:,.0f}–${high_30d:,.0f} ({range_pct:.0f}% width), "
+            f"reflecting a period of consolidation. "
+            f"Neither bulls nor bears have established conviction at current levels."
+        )
+    elif tone == "constructive":
+        p1 = (
+            f"BTC is higher on the week, up {pct_chg:.1f}% to ${spot:,.0f}, "
+            f"building on recent constructive price action. "
+            f"The move has pushed spot toward the upper end of the 30-day range "
+            f"(${low_30d:,.0f}–${high_30d:,.0f}), with the 90-day high at ${high_90d:,.0f} "
+            f"emerging as the next resistance level. "
+            f"Market breadth and on-chain metrics are supportive of continued strength."
+        )
+    else:  # bullish
+        p1 = (
+            f"BTC has rallied sharply this week, surging {pct_chg:.1f}% to ${spot:,.0f}. "
+            f"The move has taken prices through the top of the prior 30-day range "
+            f"and toward the 90-day high of ${high_90d:,.0f}. "
+            f"Spot is now {dist_from_ath:.1f}% below the all-time high of ${ath:,.0f} — "
+            f"momentum is clearly with the bulls."
+        )
+
+    # Paragraph 2 — Volatility & Derivatives
+    vol_dir_en = {"rising": "higher", "falling": "lower", "stable": "largely unchanged"}[vol_dir]
+    if vol_dir == "rising":
+        p2 = (
+            f"On the volatility front, short-dated realized vol has moved {vol_dir_en}, "
+            f"with 7D RV at {rv7:.1%} versus 30D RV at {rv30:.1%} (ratio {vol_ratio:.2f}x). "
+            f"This uptick in near-term vol is expanding the premium available on structured products. "
+            f"Our forward vol model forecasts {fv:.1%} against a long-run mean of {lr:.1%}, "
+            f"suggesting the current regime offers an attractive entry point for coupon-generating strategies — "
+            f"elevated premiums compensate for the incremental risk."
+        )
+    elif vol_dir == "falling":
+        p2 = (
+            f"Realized volatility is compressing, with 7D RV declining to {rv7:.1%} "
+            f"versus 30D RV at {rv30:.1%} (ratio {vol_ratio:.2f}x). "
+            f"Our model forecasts vol at {fv:.1%}, trending toward the long-run average of {lr:.1%}. "
+            f"We advise locking in current premium levels before further compression — "
+            f"shorter-dated structures offer the most efficient yield capture in this environment."
+        )
+    else:
+        p2 = (
+            f"Volatility remains contained, with 7D RV at {rv7:.1%} and 30D RV at {rv30:.1%} "
+            f"(ratio {vol_ratio:.2f}x). Our forward model estimates vol at {fv:.1%}, "
+            f"in line with the long-run mean of {lr:.1%}. "
+            f"Stable vol environments are historically favorable for systematic coupon strategies — "
+            f"predictable premiums and lower risk of strike breach."
+        )
+
+    # Paragraph 3 — Strategy Outlook
+    if regime == "HIGH":
+        p3 = (
+            "STRATEGY VIEW: Given the elevated vol regime, we favor wider OTM strikes (15–25%) "
+            "to provide a buffer against sharp moves while still capturing meaningful premium. "
+            "For BTC holders, covered call overlays offer a natural yield enhancement. "
+            "For stablecoin holders, selling vol via structured notes can provide "
+            "attractive coupon rates in this environment."
+        )
+    elif regime == "LOW":
+        p3 = (
+            "STRATEGY VIEW: In the current low-vol environment, we recommend tighter strikes (5–15% OTM) "
+            "to maximize coupon capture. The probability of breach is historically low at these levels, "
+            "making this an optimal window for yield-seeking allocations. "
+            "We particularly like the short-dated (7–14D) structures where "
+            "annualized yields are most attractive on a risk-adjusted basis."
+        )
+    else:
+        p3 = (
+            "STRATEGY VIEW: The balanced vol regime supports a barbell approach — "
+            "shorter-dated structures (7–14D) at tighter strikes for yield, "
+            "combined with longer-dated (21–28D) at wider strikes for safety. "
+            "Our quantitative model identifies the sweet spot where annualized yield "
+            "is maximized subject to the no-hit constraint, and we highlight "
+            "specific opportunities below."
+        )
+
+    return f"{p1}\n\n{p2}\n\n{p3}"
+
+
+def _narrative_kr(spot, btc_df, vol_data, pct_chg, rv7, rv30, regime):
+    """Goldman-style Korean market narrative with data-driven insights."""
+    tone, vol_dir = _market_sentiment(pct_chg, rv7, rv30, regime)
+
+    high_30d = btc_df["high"].tail(30).max()
+    low_30d = btc_df["low"].tail(30).min()
+    high_90d = btc_df["high"].tail(90).max()
+    low_90d = btc_df["low"].tail(90).min()
+    ath = btc_df["high"].max()
+    fv = vol_data["forecast_rv"]
+    lr = vol_data["long_run_mean"]
+    range_pct = (high_30d - low_30d) / spot * 100 if spot > 0 else 0
+    dist_from_ath = (ath - spot) / ath * 100 if ath > 0 else 0
+    vol_ratio = rv7 / rv30 if rv30 > 0 else 1.0
+
+    # Paragraph 1 — 시장 개관
+    if tone == "bearish":
+        p1 = (
+            f"금주 디지털 자산 시장은 뚜렷한 약세를 보이며 BTC가 전주 대비 {abs(pct_chg):.1f}% 하락, "
+            f"${spot:,.0f} 수준에서 거래되고 있습니다. 30일 레인지(${low_30d:,.0f}–${high_30d:,.0f}) "
+            f"하단을 테스트하고 있으며, 90일 저점 ${low_90d:,.0f}이 핵심 지지선으로 부각되고 있습니다. "
+            f"리스크 센티먼트가 크게 악화된 가운데 하방 플로우가 우세합니다."
+        )
+    elif tone == "cautious":
+        p1 = (
+            f"BTC가 금주 {abs(pct_chg):.1f}% 소폭 하락하여 ${spot:,.0f}에 거래 중입니다. "
+            f"30일 레인지 ${low_30d:,.0f}–${high_30d:,.0f} 내에서 움직이고 있으나 "
+            f"매크로 불확실성 속에 시장 심리가 다소 위축되고 있습니다. "
+            f"90일 저점 ${low_90d:,.0f}이 하방 지지대로 작용하고 있습니다."
+        )
+    elif tone == "neutral":
+        p1 = (
+            f"BTC는 ${spot:,.0f} 부근에서 보합세를 이어가고 있습니다(주간 {pct_chg:+.1f}%). "
+            f"30일 레인지가 ${low_30d:,.0f}–${high_30d:,.0f}(폭 {range_pct:.0f}%)로 축소되어 "
+            f"방향성 탐색 구간에 진입한 것으로 판단됩니다. "
+            f"매수·매도 양측 모두 뚜렷한 확신 없이 관망세가 지속되고 있습니다."
+        )
+    elif tone == "constructive":
+        p1 = (
+            f"금주 BTC는 {pct_chg:.1f}% 상승하여 ${spot:,.0f}까지 반등했습니다. "
+            f"30일 레인지(${low_30d:,.0f}–${high_30d:,.0f}) 상단을 시험 중이며, "
+            f"90일 고점 ${high_90d:,.0f}이 다음 저항선으로 주목됩니다. "
+            f"온체인 지표와 시장 브레드스가 추가 상승을 지지하고 있습니다."
+        )
+    else:  # bullish
+        p1 = (
+            f"BTC가 금주 {pct_chg:.1f}% 급등하며 ${spot:,.0f}까지 상승했습니다. "
+            f"기존 30일 레인지 상단을 돌파했으며 90일 고점 ${high_90d:,.0f}을 향해 진행 중입니다. "
+            f"현재 역대 최고가 ${ath:,.0f} 대비 {dist_from_ath:.1f}% 하방에 위치해 있으며, "
+            f"모멘텀은 확실히 매수 쪽에 있습니다."
+        )
+
+    # Paragraph 2 — 변동성 & 파생상품
+    if vol_dir == "rising":
+        p2 = (
+            f"변동성 측면에서 단기 실현변동성이 확대되고 있습니다. "
+            f"7일 RV {rv7:.1%} vs 30일 RV {rv30:.1%}(비율 {vol_ratio:.2f}배)로 "
+            f"근기 변동성이 장기 대비 상승하였습니다. "
+            f"당사 모델 기준 예측 변동성은 {fv:.1%}이며 장기 평균 {lr:.1%} 대비 높은 수준입니다. "
+            f"현재 구간은 구조화 상품의 쿠폰 수익 극대화에 유리한 진입 시점으로 — "
+            f"상승한 프리미엄이 리스크를 충분히 보상하고 있습니다."
+        )
+    elif vol_dir == "falling":
+        p2 = (
+            f"실현변동성이 하향 안정화되고 있습니다. "
+            f"7일 RV {rv7:.1%}, 30일 RV {rv30:.1%}(비율 {vol_ratio:.2f}배)이며, "
+            f"당사 예측 모델 기준 {fv:.1%}로 장기 평균 {lr:.1%}에 수렴 중입니다. "
+            f"프리미엄이 추가 축소되기 전에 현재 수준에서 수익률을 확보하는 것을 권장드리며, "
+            f"단기 만기 구조가 가장 효율적인 수익 캡처 수단입니다."
+        )
+    else:
+        p2 = (
+            f"변동성이 안정적 흐름을 유지하고 있습니다. "
+            f"7일 RV {rv7:.1%}, 30일 RV {rv30:.1%}(비율 {vol_ratio:.2f}배)로 균형 잡힌 수준이며, "
+            f"당사 모델 예측치 {fv:.1%}는 장기 평균 {lr:.1%}과 일치합니다. "
+            f"안정적 변동성 환경은 역사적으로 시스템적 쿠폰 전략에 가장 유리한 구간으로 — "
+            f"예측 가능한 프리미엄과 낮은 스트라이크 도달 리스크를 동시에 제공합니다."
+        )
+
+    # Paragraph 3 — 전략 뷰
+    if regime == "HIGH":
+        p3 = (
+            "전략 뷰: 고변동성 환경을 감안하여 넓은 OTM 스트라이크(15–25%)를 선호합니다. "
+            "급격한 가격 변동에 대한 버퍼를 확보하면서도 의미 있는 프리미엄 수취가 가능합니다. "
+            "BTC 보유자의 경우 커버드콜 오버레이를 통한 수익률 향상이 자연스러우며, "
+            "스테이블코인 보유자의 경우 구조화 노트를 통한 변동성 매도 전략이 "
+            "현 환경에서 매력적인 쿠폰을 제공합니다."
+        )
+    elif regime == "LOW":
+        p3 = (
+            "전략 뷰: 저변동성 환경에서 타이트한 스트라이크(5–15% OTM)를 통한 쿠폰 극대화를 권장합니다. "
+            "해당 레벨에서의 스트라이크 도달 확률은 역사적으로 낮아, "
+            "수익 추구형 배분에 최적의 진입 구간입니다. "
+            "특히 단기 만기(7–14일) 구조에서 위험 대비 연환산 수익률이 가장 매력적입니다."
+        )
+    else:
+        p3 = (
+            "전략 뷰: 균형 잡힌 변동성 환경에서 바벨 전략을 추천드립니다 — "
+            "단기 만기(7–14일)는 타이트한 스트라이크로 수익률을 확보하고, "
+            "장기 만기(21–28일)는 넓은 스트라이크로 안전성을 강화하는 조합입니다. "
+            "당사 퀀트 모델이 미도달 조건 하에서 연환산 수익률을 최적화하는 "
+            "Sweet Spot을 도출하였으며, 아래에 구체적 기회를 제안드립니다."
+        )
+
+    return f"{p1}\n\n{p2}\n\n{p3}"
 
 
 def _build_sales_memo_en(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, safety_pct,
                          headline, custom_narrative, extra_lines):
     """Generate an English Telegram-ready sales memo."""
     regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
-    _, auto_narrative = _market_sentiment(pct_chg, rv7, rv30, regime)
+    auto_narrative = _narrative_en(spot, btc_df, vol_data, pct_chg, rv7, rv30, regime)
     narrative = custom_narrative if custom_narrative.strip() else auto_narrative
     today = datetime.now(timezone.utc).date()
 
@@ -320,9 +524,9 @@ def _build_sales_memo_en(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30,
         narrative,
         "",
         f"BTC spot ref ${spot:,.0f} | 30D range ${low_30d:,.0f} – ${high_30d:,.0f}",
-        f"Vol regime: {regime} | 7D RV {rv7:.1%} | 30D RV {rv30:.1%}",
+        f"Vol: 7D RV {rv7:.1%} | 30D RV {rv30:.1%} | Fwd {vol_data['forecast_rv']:.1%} | Regime {regime}",
         "",
-        "── Recommended Structures (spot ref ${:,.0f}) ──".format(spot),
+        "── Mid-Market Interests (spot ref ${:,.0f}) ──".format(spot),
         "",
     ]
 
@@ -351,7 +555,7 @@ def _build_sales_memo_en(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30,
 
     lines += [
         "",
-        "Reach out for custom structures or sizing.",
+        "Please reach out for custom structures, sizing, or to discuss any of the above.",
         "",
         f"— VERONICA Research Desk | {today.strftime('%d %b %Y')}",
     ]
@@ -367,18 +571,8 @@ def _build_sales_memo_kr(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30,
     high_30d = btc_df["high"].tail(30).max()
     low_30d = btc_df["low"].tail(30).min()
 
-    # Korean auto-narrative by tone
-    tone_label, _ = _market_sentiment(pct_chg, rv7, rv30, regime)
-    vol_dir = "상승" if (rv30 > 0 and rv7 / rv30 > 1.10) else "하락" if (rv30 > 0 and rv7 / rv30 < 0.90) else "안정"
-
-    kr_narratives = {
-        "bearish": f"디지털 자산 전반적으로 약세가 지속되고 있습니다. 변동성 {vol_dir} 국면에서 구조화 상품을 통한 쿠폰 수취 전략이 유효합니다.",
-        "cautious": f"시장이 소폭 하락세를 보이고 있으며, 변동성은 {vol_dir} 추세입니다. 커버드콜 구조가 매력적인 구간입니다.",
-        "neutral": f"BTC가 박스권에서 움직이고 있으며 변동성은 {vol_dir}세입니다. 안정적 쿠폰 수익을 위한 콜 매도 전략을 추천드립니다.",
-        "constructive": f"시장이 점진적 상승세를 보이고 있습니다. 변동성 {vol_dir} 국면에서 넓은 스트라이크로 상승 참여와 쿠폰을 동시에 확보할 수 있습니다.",
-        "bullish": f"강한 상승 모멘텀이 이어지고 있습니다. 변동성 {vol_dir} 환경에서 높은 OTM 스트라이크를 통해 상승 여력을 남기면서 쿠폰을 확보하세요.",
-    }
-    narrative = custom_narrative_kr if custom_narrative_kr.strip() else kr_narratives.get(tone_label, "시장 동향을 반영한 맞춤 구조를 제안드립니다.")
+    auto_narrative = _narrative_kr(spot, btc_df, vol_data, pct_chg, rv7, rv30, regime)
+    narrative = custom_narrative_kr if custom_narrative_kr.strip() else auto_narrative
 
     regime_kr = {"LOW": "저변동성", "NORMAL": "보통", "HIGH": "고변동성"}.get(regime, regime)
 
@@ -388,7 +582,7 @@ def _build_sales_memo_kr(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30,
         narrative,
         "",
         f"BTC 현재가 ${spot:,.0f} | 30일 레인지 ${low_30d:,.0f} – ${high_30d:,.0f}",
-        f"변동성 환경: {regime_kr} | 7일 RV {rv7:.1%} | 30일 RV {rv30:.1%}",
+        f"변동성: 7일 RV {rv7:.1%} | 30일 RV {rv30:.1%} | 예측 {vol_data['forecast_rv']:.1%} | 환경 {regime_kr}",
         "",
         "── 추천 구조 (기준가 ${:,.0f}) ──".format(spot),
         "",
@@ -419,7 +613,7 @@ def _build_sales_memo_kr(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30,
 
     lines += [
         "",
-        "맞춤 구조 및 사이징 문의는 연락주시기 바랍니다.",
+        "맞춤 구조 및 사이징 관련 문의사항은 연락주시기 바랍니다.",
         "",
         f"— VERONICA Research Desk | {today.strftime('%Y년 %m월 %d일')}",
     ]
@@ -787,13 +981,13 @@ with tab_memo:
     # Auto-detect sentiment
     pct_chg_memo, _ = _weekly_change(btc_df)
     regime_memo = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
-    tone_label, auto_narrative_en = _market_sentiment(pct_chg_memo, rv_7d_last, rv_30d_last, regime_memo)
+    tone_label, _ = _market_sentiment(pct_chg_memo, rv_7d_last, rv_30d_last, regime_memo)
 
     tone_display = {
         "bearish": "Bearish 🔴", "cautious": "Cautious 🟠", "neutral": "Neutral ⚪",
         "constructive": "Constructive 🟢", "bullish": "Bullish 🟢",
     }
-    st.info(f"**Auto-detected tone: {tone_display.get(tone_label, tone_label)}** — You can override the narratives below.")
+    st.info(f"**Auto-detected tone: {tone_display.get(tone_label, tone_label)}** — Leave narrative blank for auto-generated institutional-grade commentary.")
 
     # ── Inputs: EN + KR side by side ──
     en_col, kr_col = st.columns(2)
@@ -803,8 +997,9 @@ with tab_memo:
             "Headline (EN)", value="Weekly BTC Options Desk Update", key="hl_en",
         )
         memo_narrative_en = st.text_area(
-            "Narrative (EN) — blank = auto", value="", height=80,
-            placeholder=auto_narrative_en, key="narr_en",
+            "Narrative (EN) — blank = auto", value="", height=120,
+            placeholder="Leave blank for auto-generated Goldman-style market narrative...",
+            key="narr_en",
         )
         memo_extra_en = st.text_area(
             "Additional Lines (EN)", value="", height=60,
@@ -817,8 +1012,9 @@ with tab_memo:
             "헤드라인 (KR)", value="주간 BTC 옵션 데스크 업데이트", key="hl_kr",
         )
         memo_narrative_kr = st.text_area(
-            "내러티브 (KR) — 빈칸 = 자동 생성", value="", height=80,
-            placeholder="시장 코멘터리를 입력하세요...", key="narr_kr",
+            "내러티브 (KR) — 빈칸 = 자동 생성", value="", height=120,
+            placeholder="빈칸 시 기관급 시황 코멘터리가 자동 생성됩니다...",
+            key="narr_kr",
         )
         memo_extra_kr = st.text_area(
             "추가 라인 (KR)", value="", height=60,
