@@ -459,31 +459,138 @@ with tab_bt:
 with tab_rec:
     st.subheader("Weekly Recommendation")
 
-    rec = _generate_recommendation(
+    # Volatility regime (shared across all expiries)
+    regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
+    regime_map = {"LOW": "LOW", "NORMAL": "NORMAL", "HIGH": "HIGH"}
+    rec_single = _generate_recommendation(
         btc_spot, vol_data, strike_df, rv_7d_last, rv_30d_last, btc_df, safety_threshold,
     )
+    st.info(f"**Volatility Regime: {regime}** — {rec_single['reasoning']}")
 
-    regime_map = {"LOW": ("LOW", "green"), "NORMAL": ("NORMAL", "orange"), "HIGH": ("HIGH", "red")}
-    regime_label, regime_color = regime_map.get(rec["regime"], ("NORMAL", "orange"))
-    st.info(f"**Volatility Regime: {regime_label}** — {rec['reasoning']}")
+    # ── Risk Warnings (global) ──
+    if rec_single["warnings"]:
+        for w in rec_single["warnings"]:
+            st.warning(w)
 
     st.markdown("---")
 
-    rc1, rc2, rc3, rc4 = st.columns(4)
-    rc1.metric("Recommended Strike", f"{rec['otm']}% OTM")
-    rc2.metric("Strike Price", f"${rec['strike']:,.0f}")
-    rc3.metric("Expected Coupon", f"{rec['prem_pct']:.3f}%")
-    rc4.metric("Annualized Yield", f"{rec['ann_yield']:.2f}%")
+    # ── Multi-Expiry Analysis ──
+    st.subheader("Multi-Expiry Comparison")
+    st.caption("Recommended strike for each expiry period based on current volatility regime and safety threshold.")
 
-    rc5, rc6 = st.columns(2)
-    rc5.metric("Historical Safety", f"{rec['safety']:.1f}%")
-    rc6.metric("Risk Level", rec["risk"])
+    REC_EXPIRIES = [7, 14, 21, 28]
 
-    if rec["warnings"]:
-        st.markdown("---")
-        st.markdown("### Risk Warnings")
-        for w in rec["warnings"]:
-            st.warning(w)
+    # Build strike tables and recommendations for each expiry
+    multi_rows = []
+    multi_recs = {}
+    for exp in REC_EXPIRIES:
+        sdf = _strike_table(btc_spot, vol_data["forecast_rv"], exp, prices_arr, OTM_LEVELS)
+        rec = _generate_recommendation(
+            btc_spot, vol_data, sdf, rv_7d_last, rv_30d_last, btc_df, safety_threshold,
+        )
+        multi_recs[exp] = {"rec": rec, "strike_df": sdf}
+        multi_rows.append({
+            "Expiry": f"{exp}D",
+            "Rec. OTM %": f"{rec['otm']}%",
+            "Strike (USD)": rec["strike"],
+            "Coupon (%)": rec["prem_pct"],
+            "Ann. Yield (%)": rec["ann_yield"],
+            "Safety (%)": rec["safety"],
+            "Risk": rec["risk"],
+        })
+
+    summary_df = pd.DataFrame(multi_rows)
+
+    # Display summary metrics per expiry in columns
+    cols = st.columns(len(REC_EXPIRIES))
+    for i, exp in enumerate(REC_EXPIRIES):
+        r = multi_recs[exp]["rec"]
+        with cols[i]:
+            st.markdown(f"#### {exp}-Day Expiry")
+            st.metric("Strike", f"{r['otm']}% OTM (${r['strike']:,.0f})")
+            st.metric("Coupon", f"{r['prem_pct']:.3f}%")
+            st.metric("Ann. Yield", f"{r['ann_yield']:.2f}%")
+            st.metric("Safety", f"{r['safety']:.1f}%")
+            risk_icon = {"Low": "🟢", "Medium": "🟡", "High": "🔴"}.get(r["risk"], "⚪")
+            st.markdown(f"Risk: {risk_icon} **{r['risk']}**")
+
+    st.markdown("---")
+
+    # Comparison table
+    st.subheader("Side-by-Side Summary")
+    disp_summary = summary_df.copy()
+    disp_summary["Strike (USD)"] = disp_summary["Strike (USD)"].map("${:,.0f}".format)
+    disp_summary["Coupon (%)"] = disp_summary["Coupon (%)"].map("{:.3f}%".format)
+    disp_summary["Ann. Yield (%)"] = disp_summary["Ann. Yield (%)"].map("{:.2f}%".format)
+    disp_summary["Safety (%)"] = disp_summary["Safety (%)"].map("{:.1f}%".format)
+    st.dataframe(disp_summary, use_container_width=True, hide_index=True)
+
+    csv_rec = summary_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download Recommendation CSV", data=csv_rec,
+        file_name="btc_multi_expiry_recommendation.csv", mime="text/csv",
+    )
+
+    st.markdown("---")
+
+    # ── Per-expiry detail drilldown ──
+    st.subheader("Expiry Drilldown")
+    detail_exp = st.selectbox("Select expiry to view full strike table", REC_EXPIRIES, index=3, key="rec_detail_exp")
+    detail_sdf = multi_recs[detail_exp]["strike_df"]
+    detail_rec = multi_recs[detail_exp]["rec"]
+
+    sweet_idx = _find_sweet_spot(detail_sdf, safety_threshold)
+    if sweet_idx is not None:
+        sw = detail_sdf.loc[sweet_idx]
+        st.success(
+            f"**Sweet Spot ({detail_exp}D): {sw['OTM %']}% OTM** — "
+            f"Strike ${sw['Strike (USD)']:,.0f}  |  "
+            f"Ann. Yield {sw['Ann. Yield %']:.2f}%  |  "
+            f"Safety {sw['P(No-Hit)']:.1%}"
+        )
+
+    detail_disp = detail_sdf.copy()
+    detail_disp["OTM %"] = detail_disp["OTM %"].map("{:.0f}%".format)
+    detail_disp["Strike (USD)"] = detail_disp["Strike (USD)"].map("${:,.0f}".format)
+    detail_disp["BS Premium (USD)"] = detail_disp["BS Premium (USD)"].map("${:,.2f}".format)
+    detail_disp["Premium %"] = detail_disp["Premium %"].map("{:.3f}%".format)
+    detail_disp["Ann. Yield %"] = detail_disp["Ann. Yield %"].map("{:.2f}%".format)
+    detail_disp["P(No-Hit)"] = detail_disp["P(No-Hit)"].map("{:.1%}".format)
+    st.dataframe(detail_disp, use_container_width=True, hide_index=True)
+
+    # ── Yield vs Safety scatter chart across all expiries ──
+    st.markdown("---")
+    st.subheader("Yield vs Safety Map")
+    scatter_fig = go.Figure()
+    colors_exp = {"7": "#FF6B6B", "14": "#FFA94D", "21": "#51CF66", "28": "#339AF0"}
+    for exp in REC_EXPIRIES:
+        sdf = multi_recs[exp]["strike_df"]
+        scatter_fig.add_trace(go.Scatter(
+            x=sdf["P(No-Hit)"] * 100,
+            y=sdf["Ann. Yield %"],
+            mode="markers+text",
+            text=sdf["OTM %"].astype(str) + "%",
+            textposition="top center",
+            name=f"{exp}D Expiry",
+            marker=dict(size=12, color=colors_exp.get(str(exp), "#888")),
+            hovertemplate=(
+                f"{exp}D Expiry<br>"
+                "OTM: %{text}<br>"
+                "Safety: %{x:.1f}%<br>"
+                "Ann. Yield: %{y:.2f}%<extra></extra>"
+            ),
+        ))
+    scatter_fig.add_vline(x=safety_pct, line_dash="dash", line_color="gray",
+                          annotation_text=f"Safety Threshold ({safety_pct}%)")
+    scatter_fig.update_layout(
+        title="Annualized Yield vs Historical Safety (All Expiries)",
+        xaxis_title="P(No-Hit) %", yaxis_title="Annualized Yield %",
+        plot_bgcolor="white", height=500, hovermode="closest",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(scatter_fig, use_container_width=True)
+
+    st.markdown("---")
 
     with st.expander("Methodology"):
         st.markdown(f"""
@@ -492,13 +599,13 @@ with tab_rec:
 1. **Volatility Regime** — The forecasted volatility (EMA + mean-reversion model) is compared to its
    long-run average. If it is >15% above average → HIGH; >15% below → LOW; otherwise NORMAL.
 
-2. **Strike Selection:**
+2. **Strike Selection (applied independently per expiry):**
    - **LOW regime:** Select the *lowest* OTM% that still meets the safety threshold (maximize coupon).
    - **HIGH regime:** Select the *highest* OTM% that still meets the threshold (maximize safety).
    - **NORMAL regime:** Select the OTM% with the *highest annualized yield* among safe strikes.
 
 3. **Safety Threshold:** Currently set to **{safety_pct}%** — meaning the strike must *not* have been
-   breached in at least {safety_pct}% of all historical rolling windows.
+   breached in at least {safety_pct}% of all historical rolling windows of that expiry length.
 
 4. **Risk Warnings** fire when:
    - 7-day RV exceeds 30-day RV by >10% (rising vol trend)
@@ -510,5 +617,4 @@ with tab_rec:
 - Risk-free rate: 0%
 """)
 
-    st.markdown("---")
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
