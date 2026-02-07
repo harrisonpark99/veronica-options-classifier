@@ -865,7 +865,7 @@ with tab_memo:
             margin-right:8px;
         ">Copy English</button>
         """
-        components.html(_js_en, height=50, key="copy_en")
+        components.html(_js_en, height=50)
 
         st.download_button(
             "Download EN .txt", data=memo_en.encode("utf-8"),
@@ -892,7 +892,7 @@ with tab_memo:
             margin-right:8px;
         ">한국어 복사</button>
         """
-        components.html(_js_kr, height=50, key="copy_kr")
+        components.html(_js_kr, height=50)
 
         st.download_button(
             "Download KR .txt", data=memo_kr.encode("utf-8"),
