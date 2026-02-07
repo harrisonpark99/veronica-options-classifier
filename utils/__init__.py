@@ -15,3 +15,8 @@ from .okx_api import (
     get_batch_okx_closes, debug_fetch_okx_ticker,
     build_current_price_debug_table_okx
 )
+from .options import (
+    to_okx_inst_id, get_close_prices_okx, get_ohlcv_data_okx,
+    compute_rolling_volatility, compute_ema, forecast_volatility,
+    black_scholes_price
+)

@@ -200,6 +200,7 @@ def show_dashboard():
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
         st.page_link("pages/6_Ledger_Tool.py", label="Ledger Tool", icon="📒")
+        st.page_link("pages/7_Weekly_BTC_Research.py", label="Weekly BTC Research", icon="🔬")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -306,6 +307,24 @@ def show_dashboard():
         )
         if st.button("Ledger Tool 열기", key="open_ledger_tool", use_container_width=True):
             st.switch_page("pages/6_Ledger_Tool.py")
+
+    col7, col8 = st.columns(2)
+
+    with col7:
+        st.markdown("### 🔬 Weekly BTC Research")
+        st.markdown(
+            """
+            Weekly BTC call option research & strike recommendations.
+
+            **Key Features:**
+            - Weekly market overview & volatility trends
+            - Strike analysis with historical no-hit probability
+            - Historical backtest simulation
+            - Automated strike recommendation engine
+            """
+        )
+        if st.button("Weekly BTC Research", key="open_btc_research", use_container_width=True):
+            st.switch_page("pages/7_Weekly_BTC_Research.py")
 
     st.markdown("---")
 
