@@ -303,50 +303,45 @@ def _market_sentiment(pct_chg, rv7, rv30, vol_regime):
     return tone, narrative
 
 
-def _build_sales_memo(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, safety_pct,
-                      headline, custom_narrative, extra_lines):
-    """Generate a Telegram-ready sales memo."""
+def _build_sales_memo_en(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, safety_pct,
+                         headline, custom_narrative, extra_lines):
+    """Generate an English Telegram-ready sales memo."""
     regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
     _, auto_narrative = _market_sentiment(pct_chg, rv7, rv30, regime)
     narrative = custom_narrative if custom_narrative.strip() else auto_narrative
-
-    # Date references for expiries
     today = datetime.now(timezone.utc).date()
 
-    lines = []
-    lines.append(f"📊 {headline}")
-    lines.append("")
-    lines.append(narrative)
-    lines.append("")
-
-    # Support / resistance context
     high_30d = btc_df["high"].tail(30).max()
     low_30d = btc_df["low"].tail(30).min()
-    lines.append(f"BTC spot ref ${spot:,.0f} | 30D range ${low_30d:,.0f} – ${high_30d:,.0f}")
-    lines.append(f"Vol regime: {regime} | 7D RV {rv7:.1%} | 30D RV {rv30:.1%}")
-    lines.append("")
 
-    # Product recommendations
-    lines.append("── Recommended Structures ──")
-    lines.append("")
+    lines = [
+        f"📊 {headline}",
+        "",
+        narrative,
+        "",
+        f"BTC spot ref ${spot:,.0f} | 30D range ${low_30d:,.0f} – ${high_30d:,.0f}",
+        f"Vol regime: {regime} | 7D RV {rv7:.1%} | 30D RV {rv30:.1%}",
+        "",
+        "── Recommended Structures (spot ref ${:,.0f}) ──".format(spot),
+        "",
+    ]
 
     for exp in [7, 14, 21, 28]:
         if exp not in multi_recs:
             continue
         r = multi_recs[exp]["rec"]
-        sdf = multi_recs[exp]["strike_df"]
         expiry_date = today + timedelta(days=exp)
         date_str = expiry_date.strftime("%d%b").upper()
-
+        otm = r["otm"]
         strike_usd = r["strike"]
         prem_usd = r["prem_pct"] / 100.0 * spot
         ann_yield = r["ann_yield"]
-        safety = r["safety"]
+        no_hit = r["safety"]
 
         lines.append(
-            f"_ BTC {date_str} ${strike_usd:,.0f} Call = "
+            f"_ BTC {date_str} {otm}% OTM (${strike_usd:,.0f}) Call = "
             f"${prem_usd:,.0f} per BTC "
-            f"({ann_yield:.1f}% ann. | {safety:.0f}% safety)"
+            f"({ann_yield:.1f}% ann. | {no_hit:.0f}% no-hit)"
         )
 
     if extra_lines.strip():
@@ -354,11 +349,80 @@ def _build_sales_memo(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, sa
         for el in extra_lines.strip().split("\n"):
             lines.append(el)
 
-    lines.append("")
-    lines.append("Reach out for custom structures or sizing.")
-    lines.append("")
-    lines.append(f"— VERONICA Research Desk | {today.strftime('%d %b %Y')}")
+    lines += [
+        "",
+        "Reach out for custom structures or sizing.",
+        "",
+        f"— VERONICA Research Desk | {today.strftime('%d %b %Y')}",
+    ]
+    return "\n".join(lines)
 
+
+def _build_sales_memo_kr(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, safety_pct,
+                         headline_kr, custom_narrative_kr, extra_lines_kr):
+    """Generate a Korean Telegram-ready sales memo."""
+    regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
+    today = datetime.now(timezone.utc).date()
+
+    high_30d = btc_df["high"].tail(30).max()
+    low_30d = btc_df["low"].tail(30).min()
+
+    # Korean auto-narrative by tone
+    tone_label, _ = _market_sentiment(pct_chg, rv7, rv30, regime)
+    vol_dir = "상승" if (rv30 > 0 and rv7 / rv30 > 1.10) else "하락" if (rv30 > 0 and rv7 / rv30 < 0.90) else "안정"
+
+    kr_narratives = {
+        "bearish": f"디지털 자산 전반적으로 약세가 지속되고 있습니다. 변동성 {vol_dir} 국면에서 구조화 상품을 통한 쿠폰 수취 전략이 유효합니다.",
+        "cautious": f"시장이 소폭 하락세를 보이고 있으며, 변동성은 {vol_dir} 추세입니다. 커버드콜 구조가 매력적인 구간입니다.",
+        "neutral": f"BTC가 박스권에서 움직이고 있으며 변동성은 {vol_dir}세입니다. 안정적 쿠폰 수익을 위한 콜 매도 전략을 추천드립니다.",
+        "constructive": f"시장이 점진적 상승세를 보이고 있습니다. 변동성 {vol_dir} 국면에서 넓은 스트라이크로 상승 참여와 쿠폰을 동시에 확보할 수 있습니다.",
+        "bullish": f"강한 상승 모멘텀이 이어지고 있습니다. 변동성 {vol_dir} 환경에서 높은 OTM 스트라이크를 통해 상승 여력을 남기면서 쿠폰을 확보하세요.",
+    }
+    narrative = custom_narrative_kr if custom_narrative_kr.strip() else kr_narratives.get(tone_label, "시장 동향을 반영한 맞춤 구조를 제안드립니다.")
+
+    regime_kr = {"LOW": "저변동성", "NORMAL": "보통", "HIGH": "고변동성"}.get(regime, regime)
+
+    lines = [
+        f"📊 {headline_kr}",
+        "",
+        narrative,
+        "",
+        f"BTC 현재가 ${spot:,.0f} | 30일 레인지 ${low_30d:,.0f} – ${high_30d:,.0f}",
+        f"변동성 환경: {regime_kr} | 7일 RV {rv7:.1%} | 30일 RV {rv30:.1%}",
+        "",
+        "── 추천 구조 (기준가 ${:,.0f}) ──".format(spot),
+        "",
+    ]
+
+    for exp in [7, 14, 21, 28]:
+        if exp not in multi_recs:
+            continue
+        r = multi_recs[exp]["rec"]
+        expiry_date = today + timedelta(days=exp)
+        date_str = expiry_date.strftime("%m/%d")
+        otm = r["otm"]
+        strike_usd = r["strike"]
+        prem_usd = r["prem_pct"] / 100.0 * spot
+        ann_yield = r["ann_yield"]
+        no_hit = r["safety"]
+
+        lines.append(
+            f"_ BTC {date_str} 만기 {otm}% OTM (${strike_usd:,.0f}) 콜 = "
+            f"BTC당 ${prem_usd:,.0f} "
+            f"(연환산 {ann_yield:.1f}% | 미도달 확률 {no_hit:.0f}%)"
+        )
+
+    if extra_lines_kr.strip():
+        lines.append("")
+        for el in extra_lines_kr.strip().split("\n"):
+            lines.append(el)
+
+    lines += [
+        "",
+        "맞춤 구조 및 사이징 문의는 연락주시기 바랍니다.",
+        "",
+        f"— VERONICA Research Desk | {today.strftime('%Y년 %m월 %d일')}",
+    ]
     return "\n".join(lines)
 
 
@@ -718,47 +782,50 @@ with tab_rec:
 # ─── Tab 5: Sales Memo ────────────────────────────────────────
 with tab_memo:
     st.subheader("Sales Memo Generator")
-    st.caption("Generate a Telegram-ready market update with product recommendations. Edit, then copy.")
+    st.caption("Generate Telegram-ready market updates in English & Korean. Edit, then copy.")
 
     # Auto-detect sentiment
     pct_chg_memo, _ = _weekly_change(btc_df)
     regime_memo = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
-    tone_label, auto_narrative = _market_sentiment(pct_chg_memo, rv_7d_last, rv_30d_last, regime_memo)
+    tone_label, auto_narrative_en = _market_sentiment(pct_chg_memo, rv_7d_last, rv_30d_last, regime_memo)
 
     tone_display = {
         "bearish": "Bearish 🔴", "cautious": "Cautious 🟠", "neutral": "Neutral ⚪",
         "constructive": "Constructive 🟢", "bullish": "Bullish 🟢",
     }
-    st.info(f"**Auto-detected tone: {tone_display.get(tone_label, tone_label)}** — You can override below.")
+    st.info(f"**Auto-detected tone: {tone_display.get(tone_label, tone_label)}** — You can override the narratives below.")
 
-    mc1, mc2 = st.columns([1, 1])
-    with mc1:
-        memo_headline = st.text_input(
-            "Headline",
-            value="Weekly BTC Options Desk Update",
-            help="Title line of the memo.",
+    # ── Inputs: EN + KR side by side ──
+    en_col, kr_col = st.columns(2)
+    with en_col:
+        st.markdown("#### English")
+        memo_headline_en = st.text_input(
+            "Headline (EN)", value="Weekly BTC Options Desk Update", key="hl_en",
         )
-    with mc2:
-        st.markdown("")  # spacer
+        memo_narrative_en = st.text_area(
+            "Narrative (EN) — blank = auto", value="", height=80,
+            placeholder=auto_narrative_en, key="narr_en",
+        )
+        memo_extra_en = st.text_area(
+            "Additional Lines (EN)", value="", height=60,
+            placeholder="_ ETH 3AUG 3500 Call = $128 offer per ETH", key="extra_en",
+        )
 
-    memo_narrative = st.text_area(
-        "Market Narrative (leave blank for auto-generated)",
-        value="",
-        height=100,
-        placeholder=auto_narrative,
-        help="Custom market commentary. If empty, auto-generated narrative is used.",
-    )
+    with kr_col:
+        st.markdown("#### 한국어")
+        memo_headline_kr = st.text_input(
+            "헤드라인 (KR)", value="주간 BTC 옵션 데스크 업데이트", key="hl_kr",
+        )
+        memo_narrative_kr = st.text_area(
+            "내러티브 (KR) — 빈칸 = 자동 생성", value="", height=80,
+            placeholder="시장 코멘터리를 입력하세요...", key="narr_kr",
+        )
+        memo_extra_kr = st.text_area(
+            "추가 라인 (KR)", value="", height=60,
+            placeholder="_ ETH 08/03 만기 3500 콜 = ETH당 $128", key="extra_kr",
+        )
 
-    memo_extra = st.text_area(
-        "Additional Lines (custom products, notes, etc.)",
-        value="",
-        height=80,
-        placeholder="_ ETH 3AUG 3500 Call = $128 offer per ETH\n_ Any additional structures or notes...",
-        help="Extra lines appended after the BTC recommendations.",
-    )
-
-    # Build multi_recs if not already available in this scope
-    # (they were built in tab_rec; rebuild here for independence)
+    # Build recs
     memo_recs = {}
     for exp in [7, 14, 21, 28]:
         sdf = _strike_table(btc_spot, vol_data["forecast_rv"], exp, prices_arr, OTM_LEVELS)
@@ -767,45 +834,67 @@ with tab_memo:
         )
         memo_recs[exp] = {"rec": rec, "strike_df": sdf}
 
-    memo_text = _build_sales_memo(
-        btc_spot, btc_df, vol_data, memo_recs,
-        pct_chg_memo, rv_7d_last, rv_30d_last, safety_pct,
-        memo_headline, memo_narrative, memo_extra,
-    )
+    memo_args = (btc_spot, btc_df, vol_data, memo_recs, pct_chg_memo, rv_7d_last, rv_30d_last, safety_pct)
+
+    memo_en = _build_sales_memo_en(*memo_args, memo_headline_en, memo_narrative_en, memo_extra_en)
+    memo_kr = _build_sales_memo_kr(*memo_args, memo_headline_kr, memo_narrative_kr, memo_extra_kr)
 
     st.markdown("---")
-    st.markdown("### Preview")
-    st.code(memo_text, language=None)
 
-    # Copy button — Streamlit doesn't have native clipboard, so use a download as .txt
-    # plus a JS-based copy trick
-    st.markdown("### Copy to Clipboard")
-
-    # JS copy button
+    # ── Preview: EN and KR side by side ──
     import base64 as _b64
-    _encoded = _b64.b64encode(memo_text.encode()).decode()
-    _copy_js = f"""
-    <textarea id="memo-text" style="position:absolute;left:-9999px">{memo_text}</textarea>
-    <button onclick="
-        var t=document.getElementById('memo-text');
-        t.style.position='static';
-        t.select();
-        document.execCommand('copy');
-        t.style.position='absolute';
-        t.style.left='-9999px';
-        this.innerText='Copied!';
-        setTimeout(()=>this.innerText='Copy to Clipboard',2000);
-    " style="
-        background:#1E88E5;color:white;border:none;padding:10px 24px;
-        border-radius:6px;cursor:pointer;font-size:16px;font-weight:600;
-    ">Copy to Clipboard</button>
-    """
-    components.html(_copy_js, height=60)
+    prev_en, prev_kr = st.columns(2)
 
-    # Fallback: download as .txt
-    st.download_button(
-        "Download as .txt",
-        data=memo_text.encode("utf-8"),
-        file_name="btc_sales_memo.txt",
-        mime="text/plain",
-    )
+    with prev_en:
+        st.markdown("### English Preview")
+        st.code(memo_en, language=None)
+
+        _encoded_en = _b64.b64encode(memo_en.encode()).decode()
+        _js_en = f"""
+        <textarea id="memo-en" style="position:absolute;left:-9999px">{memo_en}</textarea>
+        <button onclick="
+            var t=document.getElementById('memo-en');
+            t.style.position='static';t.select();
+            document.execCommand('copy');
+            t.style.position='absolute';t.style.left='-9999px';
+            this.innerText='Copied!';
+            setTimeout(()=>this.innerText='Copy English',2000);
+        " style="
+            background:#1E88E5;color:white;border:none;padding:8px 20px;
+            border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;
+            margin-right:8px;
+        ">Copy English</button>
+        """
+        components.html(_js_en, height=50, key="copy_en")
+
+        st.download_button(
+            "Download EN .txt", data=memo_en.encode("utf-8"),
+            file_name="btc_sales_memo_en.txt", mime="text/plain", key="dl_en",
+        )
+
+    with prev_kr:
+        st.markdown("### 한국어 미리보기")
+        st.code(memo_kr, language=None)
+
+        _encoded_kr = _b64.b64encode(memo_kr.encode()).decode()
+        _js_kr = f"""
+        <textarea id="memo-kr" style="position:absolute;left:-9999px">{memo_kr}</textarea>
+        <button onclick="
+            var t=document.getElementById('memo-kr');
+            t.style.position='static';t.select();
+            document.execCommand('copy');
+            t.style.position='absolute';t.style.left='-9999px';
+            this.innerText='복사 완료!';
+            setTimeout(()=>this.innerText='한국어 복사',2000);
+        " style="
+            background:#1E88E5;color:white;border:none;padding:8px 20px;
+            border-radius:6px;cursor:pointer;font-size:14px;font-weight:600;
+            margin-right:8px;
+        ">한국어 복사</button>
+        """
+        components.html(_js_kr, height=50, key="copy_kr")
+
+        st.download_button(
+            "Download KR .txt", data=memo_kr.encode("utf-8"),
+            file_name="btc_sales_memo_kr.txt", mime="text/plain", key="dl_kr",
+        )
