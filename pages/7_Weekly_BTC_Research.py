@@ -1030,12 +1030,115 @@ with tab_memo:
         )
         memo_recs[exp] = {"rec": rec, "strike_df": sdf}
 
+    # ── AI Prompt Generator ──
+    st.markdown("---")
+    st.subheader("AI Narrative Generator")
+    st.caption("Copy the prompt below into ChatGPT / Claude to generate a professional narrative. Paste the response into the narrative fields above.")
+
+    high_30d = btc_df["high"].tail(30).max()
+    low_30d = btc_df["low"].tail(30).min()
+    high_90d = btc_df["high"].tail(90).max()
+    low_90d = btc_df["low"].tail(90).min()
+    ath = btc_df["high"].max()
+    dist_ath = (ath - btc_spot) / ath * 100 if ath > 0 else 0
+    vol_ratio = rv_7d_last / rv_30d_last if rv_30d_last > 0 else 1.0
+
+    # Product lines for context
+    prod_lines = []
+    for exp in [7, 14, 21, 28]:
+        r = memo_recs[exp]["rec"]
+        today_d = datetime.now(timezone.utc).date()
+        exp_date = today_d + timedelta(days=exp)
+        prod_lines.append(
+            f"  - {exp}D expiry ({exp_date.strftime('%d%b').upper()}): "
+            f"{r['otm']}% OTM (${r['strike']:,.0f}), "
+            f"premium ${r['prem_pct']/100*btc_spot:,.0f}/BTC, "
+            f"ann. yield {r['ann_yield']:.1f}%, "
+            f"no-hit prob {r['safety']:.0f}%"
+        )
+    prod_block = "\n".join(prod_lines)
+
+    ai_prompt = f"""You are a senior institutional crypto derivatives sales strategist at a top-tier trading desk. Write a professional market update memo for Telegram distribution to institutional clients.
+
+=== MARKET DATA (as of {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}) ===
+
+BTC Spot: ${btc_spot:,.0f}
+Weekly Change: {pct_chg_memo:+.1f}%
+30D Range: ${low_30d:,.0f} – ${high_30d:,.0f}
+90D Range: ${low_90d:,.0f} – ${high_90d:,.0f}
+All-Time High: ${ath:,.0f} (current spot is {dist_ath:.1f}% below)
+
+Volatility:
+  7D Realized Vol: {rv_7d_last:.1%}
+  30D Realized Vol: {rv_30d_last:.1%}
+  7D/30D Ratio: {vol_ratio:.2f}x
+  Forward Vol Forecast: {vol_data['forecast_rv']:.1%}
+  Long-Run Mean Vol: {vol_data['long_run_mean']:.1%}
+  Vol Regime: {regime_memo}
+
+Recommended Structures:
+{prod_block}
+
+=== INSTRUCTIONS ===
+
+Write TWO versions of the market narrative (NOT the full memo, just the commentary section):
+
+**[ENGLISH]**
+Write 3 paragraphs in English:
+1. Market Overview — describe price action, key levels, sentiment drivers. Reference specific prices and ranges. Be opinionated but balanced.
+2. Volatility & Derivatives — analyze the vol surface, compare short vs long-dated RV, comment on premium levels and what they imply for structured product opportunities.
+3. Strategy View — give a clear directional recommendation for covered call / bonus coupon strategies. Specify whether to go tighter or wider on strikes and why. Reference the specific structures listed above.
+
+Tone: Confident, data-driven, like Goldman Sachs or JP Morgan institutional research. No fluff. Every sentence should contain insight or data.
+
+**[KOREAN]**
+Write the same 3 paragraphs in Korean (한국어). Use professional financial Korean (기관 리서치 수준). Do NOT translate literally — write naturally in Korean financial style.
+Use terms like: 실현변동성, 연환산 수익률, 커버드콜, 스트라이크, 프리미엄, 미도달 확률, 구조화 상품, 변동성 매도 전략.
+
+Format: Separate EN and KR sections clearly with [ENGLISH] and [KOREAN] headers."""
+
+    with st.expander("View / Copy AI Prompt", expanded=False):
+        st.code(ai_prompt, language=None)
+
+        import base64 as _b64_prompt
+        _b64_text = _b64_prompt.b64encode(ai_prompt.encode("utf-8")).decode("ascii")
+        _prompt_js = f"""
+        <script>
+        function copyPrompt(btn) {{
+            var decoded = atob("{_b64_text}");
+            var bytes = new Uint8Array(decoded.length);
+            for (var i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+            var text = new TextDecoder("utf-8").decode(bytes);
+            navigator.clipboard.writeText(text).then(function() {{
+                btn.innerText = 'Copied!';
+                setTimeout(function(){{ btn.innerText = 'Copy Prompt to Clipboard'; }}, 2000);
+            }}, function() {{
+                var ta = document.createElement('textarea');
+                ta.value = text;
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                btn.innerText = 'Copied!';
+                setTimeout(function(){{ btn.innerText = 'Copy Prompt to Clipboard'; }}, 2000);
+            }});
+        }}
+        </script>
+        <button onclick="copyPrompt(this)" style="
+            background:#FF6B6B;color:white;border:none;padding:10px 24px;
+            border-radius:6px;cursor:pointer;font-size:15px;font-weight:600;
+        ">Copy Prompt to Clipboard</button>
+        """
+        components.html(_prompt_js, height=55)
+
+    st.caption("Paste the [ENGLISH] response into 'Narrative (EN)' and [KOREAN] into '내러티브 (KR)' above, then scroll down for the final memo.")
+
+    st.markdown("---")
+
     memo_args = (btc_spot, btc_df, vol_data, memo_recs, pct_chg_memo, rv_7d_last, rv_30d_last, safety_pct)
 
     memo_en = _build_sales_memo_en(*memo_args, memo_headline_en, memo_narrative_en, memo_extra_en)
     memo_kr = _build_sales_memo_kr(*memo_args, memo_headline_kr, memo_narrative_kr, memo_extra_kr)
-
-    st.markdown("---")
 
     # ── Preview: EN and KR side by side ──
     import base64 as _b64
