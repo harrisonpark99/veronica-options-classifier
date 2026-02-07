@@ -10,9 +10,10 @@ import os, sys
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import certifi
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # TLS setup
 for _v in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE", "CURL_CA_BUNDLE"):
@@ -266,6 +267,101 @@ def _vol_regime(fv, lr_mean):
     return "NORMAL"
 
 
+def _market_sentiment(pct_chg, rv7, rv30, vol_regime):
+    """Return (sentiment_label, short_narrative) based on market conditions."""
+    if pct_chg < -5:
+        tone = "bearish"
+    elif pct_chg < -1:
+        tone = "cautious"
+    elif pct_chg > 5:
+        tone = "bullish"
+    elif pct_chg > 1:
+        tone = "constructive"
+    else:
+        tone = "neutral"
+
+    vol_dir = "rising" if (rv30 > 0 and rv7 / rv30 > 1.10) else "falling" if (rv30 > 0 and rv7 / rv30 < 0.90) else "stable"
+
+    narratives = {
+        ("bearish", "rising"): "Markets under pressure as volatility spikes. Key support levels are being tested — caution warranted but structured products can capitalize on elevated premiums.",
+        ("bearish", "stable"): "Digital assets continue to slide with sentiment turning negative. Support levels are trying to stem losses — a good environment for coupon-generating strategies.",
+        ("bearish", "falling"): "Selling pressure persists but volatility is compressing. Consider locking in current premium levels before vol normalizes further.",
+        ("cautious", "rising"): "Markets trading lower with uptick in volatility. Elevated premiums offer attractive coupon opportunities for structured products.",
+        ("cautious", "stable"): "Slight weakness across digital assets with vol holding steady. Covered call structures look compelling at current levels.",
+        ("cautious", "falling"): "Mild pullback with declining vol. Tighter strikes can capture reasonable yield as the market consolidates.",
+        ("neutral", "rising"): "Range-bound price action with vol ticking higher. Premium sellers benefit — structured products offer yield pick-up over simple spot holdings.",
+        ("neutral", "stable"): "Quiet markets with stable volatility. Consistent coupon generation via covered calls remains the play.",
+        ("neutral", "falling"): "Calm markets and declining vol. Consider shorter-dated structures before premiums compress further.",
+        ("constructive", "rising"): "Positive momentum with rising volatility — juicy premiums available. Wider strikes recommended for upside participation + coupon.",
+        ("constructive", "stable"): "Markets grinding higher with steady vol. Good conditions for call overwriting strategies.",
+        ("constructive", "falling"): "Bullish drift with vol coming in. Lock in yield via shorter expiries while premiums remain.",
+        ("bullish", "rising"): "Strong rally with vol elevated. Use wider OTM strikes to capture coupon while leaving room for continued upside.",
+        ("bullish", "stable"): "Bullish momentum continues. Wider strikes ensure participation in the move while still generating income.",
+        ("bullish", "falling"): "Strong move higher with vol declining. Premium levels still attractive — act before further vol compression.",
+    }
+    narrative = narratives.get((tone, vol_dir), "Markets moving — reach out for tailored structures.")
+    return tone, narrative
+
+
+def _build_sales_memo(spot, btc_df, vol_data, multi_recs, pct_chg, rv7, rv30, safety_pct,
+                      headline, custom_narrative, extra_lines):
+    """Generate a Telegram-ready sales memo."""
+    regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
+    _, auto_narrative = _market_sentiment(pct_chg, rv7, rv30, regime)
+    narrative = custom_narrative if custom_narrative.strip() else auto_narrative
+
+    # Date references for expiries
+    today = datetime.now(timezone.utc).date()
+
+    lines = []
+    lines.append(f"📊 {headline}")
+    lines.append("")
+    lines.append(narrative)
+    lines.append("")
+
+    # Support / resistance context
+    high_30d = btc_df["high"].tail(30).max()
+    low_30d = btc_df["low"].tail(30).min()
+    lines.append(f"BTC spot ref ${spot:,.0f} | 30D range ${low_30d:,.0f} – ${high_30d:,.0f}")
+    lines.append(f"Vol regime: {regime} | 7D RV {rv7:.1%} | 30D RV {rv30:.1%}")
+    lines.append("")
+
+    # Product recommendations
+    lines.append("── Recommended Structures ──")
+    lines.append("")
+
+    for exp in [7, 14, 21, 28]:
+        if exp not in multi_recs:
+            continue
+        r = multi_recs[exp]["rec"]
+        sdf = multi_recs[exp]["strike_df"]
+        expiry_date = today + timedelta(days=exp)
+        date_str = expiry_date.strftime("%d%b").upper()
+
+        strike_usd = r["strike"]
+        prem_usd = r["prem_pct"] / 100.0 * spot
+        ann_yield = r["ann_yield"]
+        safety = r["safety"]
+
+        lines.append(
+            f"_ BTC {date_str} ${strike_usd:,.0f} Call = "
+            f"${prem_usd:,.0f} per BTC "
+            f"({ann_yield:.1f}% ann. | {safety:.0f}% safety)"
+        )
+
+    if extra_lines.strip():
+        lines.append("")
+        for el in extra_lines.strip().split("\n"):
+            lines.append(el)
+
+    lines.append("")
+    lines.append("Reach out for custom structures or sizing.")
+    lines.append("")
+    lines.append(f"— VERONICA Research Desk | {today.strftime('%d %b %Y')}")
+
+    return "\n".join(lines)
+
+
 def _generate_recommendation(spot, vol_data, strike_df, rv7, rv30, btc_df, threshold):
     regime = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
     warnings = []
@@ -346,8 +442,8 @@ safety_threshold = safety_pct / 100.0
 
 # ═══════════════════════ Tabs ═════════════════════════════════
 
-tab_overview, tab_strike, tab_bt, tab_rec = st.tabs([
-    "Market Overview", "Strike Analysis", "Historical Backtest", "Weekly Recommendation",
+tab_overview, tab_strike, tab_bt, tab_rec, tab_memo = st.tabs([
+    "Market Overview", "Strike Analysis", "Historical Backtest", "Weekly Recommendation", "Sales Memo",
 ])
 
 # ─── Tab 1: Market Overview ────────────────────────────────────
@@ -618,3 +714,98 @@ with tab_rec:
 """)
 
     st.caption(f"Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+
+# ─── Tab 5: Sales Memo ────────────────────────────────────────
+with tab_memo:
+    st.subheader("Sales Memo Generator")
+    st.caption("Generate a Telegram-ready market update with product recommendations. Edit, then copy.")
+
+    # Auto-detect sentiment
+    pct_chg_memo, _ = _weekly_change(btc_df)
+    regime_memo = _vol_regime(vol_data["forecast_rv"], vol_data["long_run_mean"])
+    tone_label, auto_narrative = _market_sentiment(pct_chg_memo, rv_7d_last, rv_30d_last, regime_memo)
+
+    tone_display = {
+        "bearish": "Bearish 🔴", "cautious": "Cautious 🟠", "neutral": "Neutral ⚪",
+        "constructive": "Constructive 🟢", "bullish": "Bullish 🟢",
+    }
+    st.info(f"**Auto-detected tone: {tone_display.get(tone_label, tone_label)}** — You can override below.")
+
+    mc1, mc2 = st.columns([1, 1])
+    with mc1:
+        memo_headline = st.text_input(
+            "Headline",
+            value="Weekly BTC Options Desk Update",
+            help="Title line of the memo.",
+        )
+    with mc2:
+        st.markdown("")  # spacer
+
+    memo_narrative = st.text_area(
+        "Market Narrative (leave blank for auto-generated)",
+        value="",
+        height=100,
+        placeholder=auto_narrative,
+        help="Custom market commentary. If empty, auto-generated narrative is used.",
+    )
+
+    memo_extra = st.text_area(
+        "Additional Lines (custom products, notes, etc.)",
+        value="",
+        height=80,
+        placeholder="_ ETH 3AUG 3500 Call = $128 offer per ETH\n_ Any additional structures or notes...",
+        help="Extra lines appended after the BTC recommendations.",
+    )
+
+    # Build multi_recs if not already available in this scope
+    # (they were built in tab_rec; rebuild here for independence)
+    memo_recs = {}
+    for exp in [7, 14, 21, 28]:
+        sdf = _strike_table(btc_spot, vol_data["forecast_rv"], exp, prices_arr, OTM_LEVELS)
+        rec = _generate_recommendation(
+            btc_spot, vol_data, sdf, rv_7d_last, rv_30d_last, btc_df, safety_threshold,
+        )
+        memo_recs[exp] = {"rec": rec, "strike_df": sdf}
+
+    memo_text = _build_sales_memo(
+        btc_spot, btc_df, vol_data, memo_recs,
+        pct_chg_memo, rv_7d_last, rv_30d_last, safety_pct,
+        memo_headline, memo_narrative, memo_extra,
+    )
+
+    st.markdown("---")
+    st.markdown("### Preview")
+    st.code(memo_text, language=None)
+
+    # Copy button — Streamlit doesn't have native clipboard, so use a download as .txt
+    # plus a JS-based copy trick
+    st.markdown("### Copy to Clipboard")
+
+    # JS copy button
+    import base64 as _b64
+    _encoded = _b64.b64encode(memo_text.encode()).decode()
+    _copy_js = f"""
+    <textarea id="memo-text" style="position:absolute;left:-9999px">{memo_text}</textarea>
+    <button onclick="
+        var t=document.getElementById('memo-text');
+        t.style.position='static';
+        t.select();
+        document.execCommand('copy');
+        t.style.position='absolute';
+        t.style.left='-9999px';
+        this.innerText='Copied!';
+        setTimeout(()=>this.innerText='Copy to Clipboard',2000);
+    " style="
+        background:#1E88E5;color:white;border:none;padding:10px 24px;
+        border-radius:6px;cursor:pointer;font-size:16px;font-weight:600;
+    ">Copy to Clipboard</button>
+    """
+    components.html(_copy_js, height=60)
+
+    # Fallback: download as .txt
+    st.download_button(
+        "Download as .txt",
+        data=memo_text.encode("utf-8"),
+        file_name="btc_sales_memo.txt",
+        mime="text/plain",
+    )
