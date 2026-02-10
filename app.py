@@ -89,6 +89,7 @@ def show_login_page():
 
         col_f1, col_f2, col_f3 = st.columns(3)
         col_f4, col_f5, col_f6 = st.columns(3)
+        col_f7, col_f8, col_f9 = st.columns(3)
 
         with col_f1:
             st.markdown(
@@ -156,6 +157,17 @@ def show_login_page():
                 """
             )
 
+        with col_f7:
+            st.markdown(
+                """
+                **TMA Scanner**
+                - US 주요 지수 구성종목 스캔
+                - Technical Merit Analysis 점수
+                - 통합 & 유니버스별 Top 랭킹
+                - 모멘텀 비교 (다중 방법론)
+                """
+            )
+
         st.markdown("---")
         st.caption("문의: 관리자에게 연락하세요")
 
@@ -201,6 +213,7 @@ def show_dashboard():
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
         st.page_link("pages/6_Ledger_Tool.py", label="Ledger Tool", icon="📒")
         st.page_link("pages/7_Weekly_BTC_Research.py", label="Weekly BTC Research", icon="🔬")
+        st.page_link("pages/8_TMA_Scanner.py", label="TMA Scanner", icon="📌")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -325,6 +338,22 @@ def show_dashboard():
         )
         if st.button("Weekly BTC Research", key="open_btc_research", use_container_width=True):
             st.switch_page("pages/7_Weekly_BTC_Research.py")
+
+    with col8:
+        st.markdown("### 📌 TMA Scanner")
+        st.markdown(
+            """
+            US equity TMA scoring & momentum ranking scanner.
+
+            **주요 기능:**
+            - Dow 30 / S&P 100 / Nasdaq 100 / Russell Top-100
+            - Technical Merit Analysis (TMA) 종합 점수
+            - 유니버스별 & 통합 Top 랭킹
+            - 모멘텀 비교 (다중 방법론)
+            """
+        )
+        if st.button("TMA Scanner 열기", key="open_tma_scanner", use_container_width=True):
+            st.switch_page("pages/8_TMA_Scanner.py")
 
     st.markdown("---")
 
