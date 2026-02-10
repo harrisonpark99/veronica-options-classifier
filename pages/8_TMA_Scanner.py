@@ -536,11 +536,42 @@ spy = px_all["SPY"] if "SPY" in px_all.columns else pd.Series(dtype=float)
 qqq = px_all["QQQ"] if "QQQ" in px_all.columns else pd.Series(dtype=float)
 
 regime_0_15 = compute_regime_score(spy, qqq)
+prev_regime_0_15 = compute_regime_score(spy.iloc[:-1], qqq.iloc[:-1])
+
+
+# ═══════════════════════ Rank change helper ════════════════════
+
+def build_prev_rank_map(scores_df: pd.DataFrame) -> Dict[str, int]:
+    """Build ticker -> rank (1-based) map from a scores DataFrame sorted desc."""
+    if scores_df.empty:
+        return {}
+    return {ticker: rank for rank, ticker in enumerate(scores_df.index, 1)}
+
+
+def add_rank_columns(out: pd.DataFrame, prev_rank_map: Dict[str, int]) -> pd.DataFrame:
+    """Add Rank and 전일대비 columns to output DataFrame (already has Ticker col)."""
+    out = out.copy()
+    out["Rank"] = range(1, len(out) + 1)
+
+    def _fmt(row):
+        prev = prev_rank_map.get(row["Ticker"])
+        if prev is None:
+            return "NEW"
+        chg = prev - row["Rank"]
+        if chg > 0:
+            return f"▲{chg}"
+        elif chg < 0:
+            return f"▼{abs(chg)}"
+        return "─"
+
+    out["전일대비"] = out.apply(_fmt, axis=1)
+    return out
+
 
 # ═══════════════════════ Column format helper ══════════════════
 
 TMA_SHOW_COLS = [
-    "Ticker", "Name", "Universes",
+    "Rank", "전일대비", "Ticker", "Name", "Universes",
     "TMA",
     "Regime", "Leadership", "Base", "Demand", "Quality", "RiskPenalty",
     "RS6", "RS12",
@@ -550,7 +581,7 @@ TMA_SHOW_COLS = [
 ]
 
 MOM_SHOW_COLS = [
-    "Ticker", "Name", "Universes",
+    "Rank", "전일대비", "Ticker", "Name", "Universes",
     "Score", "Ret_1M", "Ret_3M", "Ret_6M", "Ret_12M", "Mom_12_1", "Vol_6M_ann",
 ]
 
@@ -608,9 +639,14 @@ with tabs[0]:
             container.warning(f"{universe_name}: TMA 계산 불가(데이터 부족/결측 과다).")
             return
 
+        # Previous day rankings
+        tma_prev = compute_tma_scores(px_u.iloc[:-1], vol_u.iloc[:-1], bench.iloc[:-1], prev_regime_0_15, min_dollar_vol)
+        prev_map = build_prev_rank_map(tma_prev)
+
         out = tma_result.head(top_n).reset_index().rename(columns={"index": "Ticker"})
         out["Universes"] = out["Ticker"].map(membership).fillna(universe_name)
         out["Name"] = out["Ticker"].map(name_map).fillna("")
+        out = add_rank_columns(out, prev_map)
         out = out[[c for c in TMA_SHOW_COLS if c in out.columns]]
 
         container.subheader(f"🏁 {universe_name} — TMA Top {top_n}")
@@ -638,9 +674,13 @@ with tabs[1]:
         if tma_all.empty:
             st.warning("통합 TMA 계산 불가(데이터 부족/결측 과다).")
         else:
+            tma_all_prev = compute_tma_scores(px_u.iloc[:-1], vol_u.iloc[:-1], bench.iloc[:-1], prev_regime_0_15, min_dollar_vol)
+            prev_map = build_prev_rank_map(tma_all_prev)
+
             out = tma_all.head(top_n).reset_index().rename(columns={"index": "Ticker"})
             out["Universes"] = out["Ticker"].map(membership).fillna("")
             out["Name"] = out["Ticker"].map(name_map).fillna("")
+            out = add_rank_columns(out, prev_map)
             out = out[[c for c in TMA_SHOW_COLS if c in out.columns]]
 
             st.dataframe(out.style.format(tma_fmt(out.columns)), use_container_width=True)
@@ -663,9 +703,14 @@ with tabs[2]:
             container.warning(f"{universe_name}: 모멘텀 계산 불가(데이터 부족/결측 과다).")
             return
 
+        # Previous day rankings
+        mom_prev = compute_momentum_scores(px_u.iloc[:-1], method=mom_method)
+        prev_map = build_prev_rank_map(mom_prev)
+
         out = mom.head(top_n).reset_index().rename(columns={"index": "Ticker"})
         out["Universes"] = out["Ticker"].map(membership).fillna(universe_name)
         out["Name"] = out["Ticker"].map(name_map).fillna("")
+        out = add_rank_columns(out, prev_map)
         out = out[[c for c in MOM_SHOW_COLS if c in out.columns]]
 
         container.subheader(f"📌 {universe_name} — Momentum Top {top_n}")
