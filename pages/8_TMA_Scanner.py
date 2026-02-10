@@ -158,26 +158,6 @@ def fetch_sp500() -> pd.DataFrame:
     raise ValueError("S&P 500 components table not found (Wikipedia layout changed).")
 
 
-@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def fetch_russell1000() -> pd.DataFrame:
-    """Russell 1000 components from Wikipedia."""
-    url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-    tables = safe_read_html(url)
-    for df in tables:
-        cols = [str(c).lower() for c in df.columns]
-        if any("symbol" in c for c in cols) and any("company" in c for c in cols):
-            out = df.copy()
-            out.columns = [str(c) for c in out.columns]
-            sym_col = [c for c in out.columns if "Symbol" in c or "symbol" in c][0]
-            name_col = [c for c in out.columns if "Company" in c or "company" in c][0]
-            out = out[[name_col, sym_col]].rename(columns={name_col: "Name", sym_col: "Ticker"})
-            out["Ticker"] = out["Ticker"].astype(str).str.strip().str.upper()
-            out = out[out["Ticker"].str.len() > 0]
-            out["Universe"] = "Russell 1000"
-            return out.reset_index(drop=True)
-    raise ValueError("Russell 1000 table not found (Wikipedia layout changed).")
-
-
 # ═══════════════════════ Data Download ═════════════════════════
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -474,7 +454,7 @@ with st.sidebar:
         index=0,
     )
 
-    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 / Russell 1000 (Wikipedia)")
+    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 (Wikipedia 기반)")
     st.markdown("---")
     if st.button("Clear Cache", use_container_width=True):
         st.cache_data.clear()
@@ -489,13 +469,7 @@ def load_all_universes() -> pd.DataFrame:
     u2 = fetch_sp100()
     u3 = fetch_nasdaq100()
     u4 = fetch_sp500()
-    parts = [u1, u2, u3, u4]
-    try:
-        u5 = fetch_russell1000()
-        parts.append(u5)
-    except Exception:
-        pass  # Russell source unavailable — continue with 4 universes
-    allu = pd.concat(parts, ignore_index=True)
+    allu = pd.concat([u1, u2, u3, u4], ignore_index=True)
     allu["Ticker"] = allu["Ticker"].astype(str).str.strip().str.upper()
     allu["Name"] = allu["Name"].astype(str).str.strip()
     return allu
