@@ -89,7 +89,7 @@ def show_login_page():
 
         col_f1, col_f2, col_f3 = st.columns(3)
         col_f4, col_f5, col_f6 = st.columns(3)
-        col_f7, col_f8, col_f9 = st.columns(3)
+        col_f7, _, _ = st.columns(3)
 
         with col_f1:
             st.markdown(
@@ -149,17 +149,6 @@ def show_login_page():
         with col_f6:
             st.markdown(
                 """
-                **Ledger Tool**
-                - 클라이언트 렛저 관리
-                - Coupon / Reclass / AES Trade
-                - Undo (Reversal) 지원
-                - Excel / PDF 내보내기
-                """
-            )
-
-        with col_f7:
-            st.markdown(
-                """
                 **TMA Scanner**
                 - US 주요 지수 구성종목 스캔
                 - Technical Merit Analysis 점수
@@ -211,7 +200,6 @@ def show_dashboard():
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
-        st.page_link("pages/6_Ledger_Tool.py", label="Ledger Tool", icon="📒")
         st.page_link("pages/7_Weekly_BTC_Research.py", label="Weekly BTC Research", icon="🔬")
         st.page_link("pages/8_TMA_Scanner.py", label="TMA Scanner", icon="📌")
 
@@ -306,24 +294,6 @@ def show_dashboard():
             st.switch_page("pages/5_Create_Invoice.py")
 
     with col6:
-        st.markdown("### 📒 Ledger Tool")
-        st.markdown(
-            """
-            클라이언트 렛저를 관리하고 추적합니다.
-
-            **주요 기능:**
-            - Coupon Received / Reclass / AES Trade 기록
-            - Asset × Bucket 요약 대시보드
-            - Undo (Reversal) 기능
-            - Excel / PDF 내보내기
-            """
-        )
-        if st.button("Ledger Tool 열기", key="open_ledger_tool", use_container_width=True):
-            st.switch_page("pages/6_Ledger_Tool.py")
-
-    col7, col8 = st.columns(2)
-
-    with col7:
         st.markdown("### 🔬 Weekly BTC Research")
         st.markdown(
             """
@@ -339,7 +309,9 @@ def show_dashboard():
         if st.button("Weekly BTC Research", key="open_btc_research", use_container_width=True):
             st.switch_page("pages/7_Weekly_BTC_Research.py")
 
-    with col8:
+    col7, col8 = st.columns(2)
+
+    with col7:
         st.markdown("### 📌 TMA Scanner")
         st.markdown(
             """
