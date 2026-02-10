@@ -158,6 +158,28 @@ def fetch_sp500() -> pd.DataFrame:
     raise ValueError("S&P 500 components table not found (Wikipedia layout changed).")
 
 
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def fetch_russell1000_top100() -> pd.DataFrame:
+    """Russell 1000 top 100 by index weight from slickcharts."""
+    url = "https://www.slickcharts.com/russell1000"
+    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+    r.raise_for_status()
+    tables = pd.read_html(r.text)
+    for df in tables:
+        cols = [str(c).lower() for c in df.columns]
+        if any("symbol" in c for c in cols) and any("company" in c for c in cols):
+            out = df.copy()
+            out.columns = [str(c) for c in out.columns]
+            sym_col = [c for c in out.columns if "symbol" in c.lower()][0]
+            name_col = [c for c in out.columns if "company" in c.lower()][0]
+            out = out[[name_col, sym_col]].rename(columns={name_col: "Name", sym_col: "Ticker"})
+            out["Ticker"] = out["Ticker"].astype(str).str.strip().str.upper()
+            out = out[out["Ticker"].str.len() > 0].head(100)
+            out["Universe"] = "Russell 1000 (Top 100)"
+            return out.reset_index(drop=True)
+    raise ValueError("Russell 1000 table not found (slickcharts layout changed).")
+
+
 # ═══════════════════════ Data Download ═════════════════════════
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
@@ -454,7 +476,7 @@ with st.sidebar:
         index=0,
     )
 
-    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 (Wikipedia 기반)")
+    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 / Russell 1000 Top 100")
     st.markdown("---")
     if st.button("Clear Cache", use_container_width=True):
         st.cache_data.clear()
@@ -469,7 +491,13 @@ def load_all_universes() -> pd.DataFrame:
     u2 = fetch_sp100()
     u3 = fetch_nasdaq100()
     u4 = fetch_sp500()
-    allu = pd.concat([u1, u2, u3, u4], ignore_index=True)
+    parts = [u1, u2, u3, u4]
+    try:
+        u5 = fetch_russell1000_top100()
+        parts.append(u5)
+    except Exception:
+        pass  # Russell source unavailable — continue with 4 universes
+    allu = pd.concat(parts, ignore_index=True)
     allu["Ticker"] = allu["Ticker"].astype(str).str.strip().str.upper()
     allu["Name"] = allu["Name"].astype(str).str.strip()
     return allu
@@ -592,8 +620,6 @@ with tabs[0]:
     st.subheader("TMA Top 랭킹 (유니버스별)")
     st.info(f"현재 Regime 점수(0~15): **{regime_0_15:.1f}**  (SPY/QQQ 기반)")
 
-    cols = st.columns(2)
-
     def render_tma(universe_name: str, container):
         sub_df, tickers = universes[universe_name]
         cols_exist = [t for t in tickers if t in px_all.columns]
@@ -618,14 +644,14 @@ with tabs[0]:
         container.subheader(f"🏁 {universe_name} — TMA Top {top_n}")
         container.dataframe(out.style.format(tma_fmt(out.columns)), use_container_width=True)
 
-    render_tma(u_names[0], cols[0])
-    render_tma(u_names[1], cols[1])
-    render_tma(u_names[2], cols[0])
-    render_tma(u_names[3], cols[1])
+    for i, uname in enumerate(u_names):
+        if i % 2 == 0:
+            tma_cols = st.columns(2)
+        render_tma(uname, tma_cols[i % 2])
 
 # ── Tab 2: Unified TMA Top ──
 with tabs[1]:
-    st.subheader("통합 TMA Top (4개 유니버스 합산, 중복 제거)")
+    st.subheader(f"통합 TMA Top ({len(u_names)}개 유니버스 합산, 중복 제거)")
     st.caption("중복 티커는 하나로 합치고, '어느 유니버스에 속하는지'를 함께 표시합니다.")
 
     cols_exist = [t for t in uni["Ticker"].unique().tolist() if t in px_all.columns]
@@ -673,7 +699,7 @@ with tabs[2]:
         container.subheader(f"📌 {universe_name} — Momentum Top {top_n}")
         container.dataframe(out.style.format(mom_fmt(out.columns)), use_container_width=True)
 
-    render_momentum(u_names[0], cols[0])
-    render_momentum(u_names[1], cols[1])
-    render_momentum(u_names[2], cols[0])
-    render_momentum(u_names[3], cols[1])
+    for i, uname in enumerate(u_names):
+        if i % 2 == 0:
+            mom_cols = st.columns(2)
+        render_momentum(uname, mom_cols[i % 2])
