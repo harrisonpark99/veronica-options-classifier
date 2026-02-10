@@ -159,25 +159,23 @@ def fetch_sp500() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def fetch_russell1000_top100() -> pd.DataFrame:
-    """Russell 1000 top 100 by index weight from slickcharts."""
-    url = "https://www.slickcharts.com/russell1000"
-    r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
-    r.raise_for_status()
-    tables = pd.read_html(r.text)
+def fetch_russell1000() -> pd.DataFrame:
+    """Russell 1000 components from Wikipedia."""
+    url = "https://en.wikipedia.org/wiki/Russell_1000_Index"
+    tables = safe_read_html(url)
     for df in tables:
         cols = [str(c).lower() for c in df.columns]
         if any("symbol" in c for c in cols) and any("company" in c for c in cols):
             out = df.copy()
             out.columns = [str(c) for c in out.columns]
-            sym_col = [c for c in out.columns if "symbol" in c.lower()][0]
-            name_col = [c for c in out.columns if "company" in c.lower()][0]
+            sym_col = [c for c in out.columns if "Symbol" in c or "symbol" in c][0]
+            name_col = [c for c in out.columns if "Company" in c or "company" in c][0]
             out = out[[name_col, sym_col]].rename(columns={name_col: "Name", sym_col: "Ticker"})
             out["Ticker"] = out["Ticker"].astype(str).str.strip().str.upper()
-            out = out[out["Ticker"].str.len() > 0].head(100)
-            out["Universe"] = "Russell 1000 (Top 100)"
+            out = out[out["Ticker"].str.len() > 0]
+            out["Universe"] = "Russell 1000"
             return out.reset_index(drop=True)
-    raise ValueError("Russell 1000 table not found (slickcharts layout changed).")
+    raise ValueError("Russell 1000 table not found (Wikipedia layout changed).")
 
 
 # ═══════════════════════ Data Download ═════════════════════════
@@ -476,7 +474,7 @@ with st.sidebar:
         index=0,
     )
 
-    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 / Russell 1000 Top 100")
+    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 / Russell 1000 (Wikipedia)")
     st.markdown("---")
     if st.button("Clear Cache", use_container_width=True):
         st.cache_data.clear()
@@ -493,7 +491,7 @@ def load_all_universes() -> pd.DataFrame:
     u4 = fetch_sp500()
     parts = [u1, u2, u3, u4]
     try:
-        u5 = fetch_russell1000_top100()
+        u5 = fetch_russell1000()
         parts.append(u5)
     except Exception:
         pass  # Russell source unavailable — continue with 4 universes
