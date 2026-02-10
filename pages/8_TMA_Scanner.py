@@ -139,22 +139,23 @@ def fetch_nasdaq100() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
-def fetch_russell_top100_proxy() -> pd.DataFrame:
-    """Russell Top-100 proxy via IWB ETF top 100 holdings."""
-    url = "https://www.financecharts.com/etfs/IWB/holdings"
+def fetch_sp500() -> pd.DataFrame:
+    """S&P 500 components from Wikipedia."""
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     tables = safe_read_html(url)
     for df in tables:
         cols = [c.lower() for c in df.columns.astype(str)]
-        if any("ticker" in c for c in cols) and any("name" in c for c in cols):
+        if any("symbol" in c for c in cols) and any("security" in c for c in cols):
             out = df.copy()
-            name_col = [c for c in out.columns if "name" in str(c).lower()][0]
-            tick_col = [c for c in out.columns if "ticker" in str(c).lower()][0]
-            out = out[[name_col, tick_col]].rename(columns={name_col: "Name", tick_col: "Ticker"})
+            out.columns = [str(c) for c in out.columns]
+            sym_col = [c for c in out.columns if "Symbol" in c or "symbol" in c][0]
+            name_col = [c for c in out.columns if "Security" in c or "security" in c][0]
+            out = out[[name_col, sym_col]].rename(columns={name_col: "Name", sym_col: "Ticker"})
             out["Ticker"] = out["Ticker"].astype(str).str.strip().str.upper()
-            out = out[out["Ticker"].str.len() > 0].head(100)
-            out["Universe"] = "Russell (Top100 proxy via IWB)"
+            out = out[out["Ticker"].str.len() > 0]
+            out["Universe"] = "S&P 500"
             return out.reset_index(drop=True)
-    raise ValueError("IWB holdings table not found (site layout changed).")
+    raise ValueError("S&P 500 components table not found (Wikipedia layout changed).")
 
 
 # ═══════════════════════ Data Download ═════════════════════════
@@ -453,7 +454,7 @@ with st.sidebar:
         index=0,
     )
 
-    st.caption("러셀은 IWB 상위 100 홀딩 프록시(무료 공개 테이블).")
+    st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 (Wikipedia 기반)")
     st.markdown("---")
     if st.button("Clear Cache", use_container_width=True):
         st.cache_data.clear()
@@ -467,7 +468,7 @@ def load_all_universes() -> pd.DataFrame:
     u1 = fetch_dow30()
     u2 = fetch_sp100()
     u3 = fetch_nasdaq100()
-    u4 = fetch_russell_top100_proxy()
+    u4 = fetch_sp500()
     allu = pd.concat([u1, u2, u3, u4], ignore_index=True)
     allu["Ticker"] = allu["Ticker"].astype(str).str.strip().str.upper()
     allu["Name"] = allu["Name"].astype(str).str.strip()
