@@ -722,7 +722,7 @@ def mom_fmt(cols) -> dict:
 
 # ═══════════════════════ Tabs ══════════════════════════════════
 
-tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교", "ℹ️ 스코어 설명"])
+tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교"])
 
 # ── Tab 1: TMA per universe ──
 with tabs[0]:
@@ -831,38 +831,3 @@ with tabs[2]:
             mom_cols = st.columns(2)
         render_momentum(uname, mom_cols[i % 2])
 
-# ── Tab 4: Score explanation ──
-with tabs[3]:
-    st.subheader("TMA(Enhanced) 스코어 구성 설명")
-    st.markdown(
-        """
-기존 TMA 스캐너(리더십/베이스/수급/퀄리티/리스크)에 아래를 추가 반영했습니다.
-
----
-
-### Wyckoff
-- **AbsorptionScore** (0~6): 박스/피벗 상단 근처에서 '상승일 거래량'이 많이 나타날수록 가점 (흡수/매집 프록시)
-- **UTPenalty** (0~-5): 최근 10일 중 '상단 찌르고 종가가 다시 상단 아래로' 자주 발생하면 감점 (Upthrust/가짜 돌파)
-
-### Larry Williams
-- **RangeExpScore** (0~3): True Range가 ATR 대비 커지고(확장), 종가가 당일 범위 상단에 위치할수록 가점 (확장 타이밍)
-
-### Thomas Bulkowski
-- **BaseDepthPen** (0~-5): 베이스 폭(60D 고저폭)이 35% 초과시 감점 (실패 확률 증가)
-- **BaseLengthScore** (0~3): 최근 80일 동안 박스 밴드 내 체류 비중이 높으면 가점 (적정 길이/구조 프록시)
-
-### Jesse Livermore
-- **52W_Bonus** (0~5): 52주 신고가 근접할수록 가점 (진짜 리더 우대)
-- **PivotProx**: 60D pivot(저항)에 가까울수록 가점 (결정적 가격 근접)
-
----
-
-### 기타 변경사항
-- **ATR**: 기존 `close.diff()` 방식에서 진정한 **True Range (OHLC)** 기반으로 변경
-- **VCP Score**: 15 → 12로 축소 (Bulkowski 지표에 배분)
-- **Volume Trend**: 10 → 6으로 축소 (Absorption/Range Expansion에 배분)
-- **최소 데이터**: 260일 → 320일로 상향 (52주 고점 등 추가 지표 필요)
-
-> 스캐너(A) 목적이라 "진입/청산 규칙" 대신 **후보의 질(quality)과 실패회피(anti-failure)**에 집중했습니다.
-"""
-    )
