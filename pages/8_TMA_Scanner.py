@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VERONICA – TMA Scanner + Momentum Compare
-Scans Dow 30, S&P 100, Nasdaq 100, Russell Top-100 (IWB proxy)
+VERONICA – TMA Scanner (Enhanced: Wyckoff/LarryW/Bulkowski/Livermore)
+Scans Dow 30, S&P 100, Nasdaq 100, S&P 500
 for Technical Merit Analysis (TMA) scores and momentum rankings.
 """
 
@@ -79,6 +79,10 @@ def minmax01(s: pd.Series) -> pd.Series:
     if not np.isfinite(mn) or not np.isfinite(mx) or mx == mn:
         return pd.Series(np.zeros(len(s)), index=s.index)
     return (s - mn) / (mx - mn)
+
+
+def pct_rank(s: pd.Series) -> pd.Series:
+    return s.rank(pct=True)
 
 
 # ═══════════════════════ Universe Fetchers ═════════════════════
@@ -158,10 +162,11 @@ def fetch_sp500() -> pd.DataFrame:
     raise ValueError("S&P 500 components table not found (Wikipedia layout changed).")
 
 
-# ═══════════════════════ Data Download ═════════════════════════
+# ═══════════════════════ Data Download (OHLCV) ═════════════════
 
 @st.cache_data(ttl=60 * 30, show_spinner=False)
-def download_ohlcv_yahoo(tickers: List[str], period: str = "2y") -> Tuple[pd.DataFrame, pd.DataFrame]:
+def download_yahoo(tickers: List[str], period: str = "2y"):
+    """Returns (adj_close, volume, open, high, low, close) DataFrames."""
     yt = [to_yahoo_ticker(t) for t in tickers]
     data = yf.download(
         tickers=yt,
@@ -172,18 +177,36 @@ def download_ohlcv_yahoo(tickers: List[str], period: str = "2y") -> Tuple[pd.Dat
         threads=True,
     )
     if data is None or data.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        empty = pd.DataFrame()
+        return empty, empty, empty, empty, empty, empty
 
-    if isinstance(data.columns, pd.MultiIndex):
-        px = data["Adj Close"].copy() if "Adj Close" in data.columns.get_level_values(0) else data["Close"].copy()
-        vol = data["Volume"].copy() if "Volume" in data.columns.get_level_values(0) else pd.DataFrame(index=px.index)
-    else:
-        px = data[["Adj Close"]].rename(columns={"Adj Close": yt[0]}) if "Adj Close" in data.columns else data[["Close"]].rename(columns={"Close": yt[0]})
-        vol = data[["Volume"]].rename(columns={"Volume": yt[0]}) if "Volume" in data.columns else pd.DataFrame(index=px.index)
+    def _extract(field, fallback=None):
+        if isinstance(data.columns, pd.MultiIndex):
+            if field in data.columns.get_level_values(0):
+                return data[field].copy()
+            if fallback and fallback in data.columns.get_level_values(0):
+                return data[fallback].copy()
+            return pd.DataFrame(index=data.index)
+        else:
+            if field in data.columns:
+                return data[[field]].rename(columns={field: yt[0]})
+            if fallback and fallback in data.columns:
+                return data[[fallback]].rename(columns={fallback: yt[0]})
+            return pd.DataFrame(index=data.index)
 
-    px.columns = [from_yahoo_ticker(str(c)) for c in px.columns]
-    vol.columns = [from_yahoo_ticker(str(c)) for c in vol.columns]
-    return px.sort_index(), vol.sort_index()
+    px = _extract("Adj Close", "Close")
+    vol = _extract("Volume")
+    op = _extract("Open")
+    hi = _extract("High")
+    lo = _extract("Low")
+    cl = _extract("Close")
+
+    def remap(df):
+        df = df.copy()
+        df.columns = [from_yahoo_ticker(str(c)) for c in df.columns]
+        return df.sort_index()
+
+    return remap(px), remap(vol), remap(op), remap(hi), remap(lo), remap(cl)
 
 
 # ═══════════════════════ Momentum Scoring ══════════════════════
@@ -253,16 +276,21 @@ def compute_momentum_scores(px: pd.DataFrame, method: str) -> pd.DataFrame:
     return df.sort_values("Score", ascending=False)
 
 
-# ═══════════════════════ TMA Scoring ═══════════════════════════
+# ═══════════════════════ Enhanced TMA Indicators ═══════════════
 
 def sma(s: pd.Series, n: int) -> pd.Series:
     return s.rolling(n).mean()
 
 
-def atr_pct(close: pd.Series, n: int = 14) -> pd.Series:
-    tr = close.diff().abs()
-    atr = tr.rolling(n).mean()
-    return atr / close
+def true_range(op: pd.Series, hi: pd.Series, lo: pd.Series, cl: pd.Series) -> pd.Series:
+    prev = cl.shift(1)
+    tr = pd.concat([(hi - lo).abs(), (hi - prev).abs(), (lo - prev).abs()], axis=1).max(axis=1)
+    return tr
+
+
+def calc_atr(op: pd.Series, hi: pd.Series, lo: pd.Series, cl: pd.Series, n: int = 14) -> pd.Series:
+    tr = true_range(op, hi, lo, cl)
+    return tr.rolling(n).mean()
 
 
 def max_drawdown(close: pd.Series, window: int = 60) -> float:
@@ -296,66 +324,89 @@ def compute_regime_score(spy: pd.Series, qqq: pd.Series) -> float:
     return float(0.65 * max(s_spy, s_qqq) + 0.35 * min(s_spy, s_qqq))
 
 
-def compute_tma_scores(
-    px: pd.DataFrame,
+# ═══════════════════════ Enhanced TMA Scoring ══════════════════
+
+def compute_tma_scores_enhanced(
+    px_adj: pd.DataFrame,
     vol: pd.DataFrame,
-    benchmark: pd.Series,
+    op: pd.DataFrame,
+    hi: pd.DataFrame,
+    lo: pd.DataFrame,
+    cl: pd.DataFrame,
+    benchmark_adj: pd.Series,
     regime_score_0_15: float,
     min_dollar_vol: float,
 ) -> pd.DataFrame:
-    if px.empty:
+    if px_adj.empty:
         return pd.DataFrame()
 
-    px = px.sort_index().ffill()
-    vol = vol.reindex(px.index).sort_index().ffill()
+    px_adj = px_adj.sort_index().ffill()
+    vol = vol.reindex(px_adj.index).sort_index().ffill()
+    op = op.reindex(px_adj.index).sort_index().ffill()
+    hi = hi.reindex(px_adj.index).sort_index().ffill()
+    lo = lo.reindex(px_adj.index).sort_index().ffill()
+    cl = cl.reindex(px_adj.index).sort_index().ffill()
 
-    if len(px) < 260:
+    if len(px_adj) < 320:
         return pd.DataFrame()
 
-    retd = px.pct_change()
+    retd = px_adj.pct_change()
 
-    def total_return(df: pd.DataFrame, days: int) -> pd.Series:
+    def total_return(df, days):
         if len(df) <= days:
             return pd.Series(np.nan, index=df.columns)
         return (df.iloc[-1] / df.iloc[-days - 1]) - 1.0
 
-    r_6m = total_return(px, 126)
-    r_12m = total_return(px, 252)
+    # --- Leadership (Livermore strengthened)
+    r_6m = total_return(px_adj, 126)
+    r_12m = total_return(px_adj, 252)
 
-    bench = benchmark.dropna()
-    if len(bench) < 260:
+    bench = benchmark_adj.dropna()
+    if len(bench) < 320:
         return pd.DataFrame()
     b6 = (bench.iloc[-1] / bench.iloc[-127]) - 1.0
     b12 = (bench.iloc[-1] / bench.iloc[-253]) - 1.0
 
     rs6 = r_6m - b6
     rs12 = r_12m - b12
+    leadership = 15 * minmax01(pct_rank(rs6)) + 15 * minmax01(pct_rank(rs12))  # 0..30
 
-    rs6_norm = minmax01(rs6.rank(pct=True))
-    rs12_norm = minmax01(rs12.rank(pct=True))
-    leadership = 15 * rs6_norm + 15 * rs12_norm
+    # Livermore bonus: 52-week high proximity (0..+5)
+    high_52w = px_adj.rolling(252).max().iloc[-1]
+    close_last = px_adj.iloc[-1]
+    prox_52w = (close_last / high_52w).replace([np.inf, -np.inf], np.nan)
+    prox52_score = 5 * ((prox_52w - 0.90) / 0.10).clip(0, 1).fillna(0)
 
-    atr14 = px.apply(lambda s: atr_pct(s, 14))
-    atr20 = atr14.rolling(20).mean().iloc[-1]
-    atr60 = atr14.rolling(60).mean().iloc[-1]
+    # --- Base: VCP + Pivot proximity + Bulkowski QA (depth/length)
+    atr14 = pd.DataFrame({c: calc_atr(op[c], hi[c], lo[c], cl[c], 14) for c in cl.columns})
+    atrp14 = (atr14.iloc[-1] / cl.iloc[-1]).replace([np.inf, -np.inf], np.nan)
+
+    atrp_series = (atr14 / cl).replace([np.inf, -np.inf], np.nan)
+    atr20 = atrp_series.rolling(20).mean().iloc[-1]
+    atr60 = atrp_series.rolling(60).mean().iloc[-1]
     contraction_ratio = (atr20 / atr60).replace([np.inf, -np.inf], np.nan)
-
     vcp_raw = (1.0 - (contraction_ratio - 0.55) / (1.0 - 0.55)).clip(0, 1)
-    vcp_score = 15 * vcp_raw.fillna(0)
+    vcp_score = 12 * vcp_raw.fillna(0)
 
-    box_high = px.rolling(60).max().iloc[-1]
-    box_low = px.rolling(60).min().iloc[-1]
+    # Pivot proximity (Livermore/Darvas)
+    pivot = px_adj.rolling(60).max().iloc[-1]
+    pivot_prox = (close_last / pivot).replace([np.inf, -np.inf], np.nan)
+    pivot_score = 5 * ((pivot_prox - 0.92) / (1.0 - 0.92)).clip(0, 1).fillna(0)
+
+    # Bulkowski depth penalty & length score
+    box_high = px_adj.rolling(60).max().iloc[-1]
+    box_low = px_adj.rolling(60).min().iloc[-1]
     box_range_pct = (box_high / box_low - 1.0).replace([np.inf, -np.inf], np.nan)
+    depth_pen = -5 * ((box_range_pct - 0.35) / (0.60 - 0.35)).clip(0, 1).fillna(0)
 
-    close_last = px.iloc[-1]
-    close_to_high = (close_last / box_high).replace([np.inf, -np.inf], np.nan)
+    band_lo = px_adj.rolling(60).min()
+    band_hi = px_adj.rolling(60).max()
+    in_band = ((px_adj >= band_lo) & (px_adj <= band_hi)).tail(80).mean()
+    length_score = 3 * ((in_band - 0.70) / (0.95 - 0.70)).clip(0, 1).fillna(0)
 
-    range_ok = (1.0 - ((box_range_pct - 0.15) / (0.35 - 0.15))).clip(0, 1)
-    prox_ok = ((close_to_high - 0.92) / (1.0 - 0.92)).clip(0, 1)
+    base_score = (vcp_score + pivot_score + length_score + depth_pen).clip(0, 25)
 
-    box_score = 10 * (0.55 * prox_ok.fillna(0) + 0.45 * range_ok.fillna(0))
-    base_score = vcp_score + box_score
-
+    # --- Demand: Wyckoff Absorption + Larry Williams Range Expansion + vol trend
     vol20 = vol.rolling(20).mean().iloc[-1]
     vol60 = vol.rolling(60).mean().iloc[-1]
     vol_ratio = (vol20 / vol60).replace([np.inf, -np.inf], np.nan)
@@ -363,67 +414,91 @@ def compute_tma_scores(
     dollar_vol20 = (vol20 * close_last).replace([np.inf, -np.inf], np.nan)
     liq_ok = (dollar_vol20 >= min_dollar_vol).astype(float)
 
-    vol_trend = ((vol_ratio - 0.8) / (1.3 - 0.8)).clip(0, 1).fillna(0)
-    vol_trend_score = 10 * vol_trend
+    vol_trend_score = 6 * ((vol_ratio - 0.8) / (1.3 - 0.8)).clip(0, 1).fillna(0)
 
-    r20 = retd.tail(20)
+    # Wyckoff absorption
+    pivot_roll = px_adj.rolling(60).max()
+    near_pivot = px_adj >= (0.95 * pivot_roll)
+    up_day = retd > 0
     v20 = vol.tail(20)
-    up_vol = (v20.where(r20 > 0, 0)).sum()
-    dn_vol = (v20.where(r20 < 0, 0)).sum()
-    up_dom = (up_vol / (up_vol + dn_vol + 1e-9)).replace([np.inf, -np.inf], np.nan)
-    up_dom_score = 5 * ((up_dom - 0.45) / (0.65 - 0.45)).clip(0, 1).fillna(0)
+    absorb_num = (v20.where(near_pivot.tail(20) & up_day.tail(20), 0)).sum()
+    absorb_den = (v20.sum() + 1e-9)
+    absorption_ratio = (absorb_num / absorb_den).replace([np.inf, -np.inf], np.nan)
+    absorption_score = 6 * ((absorption_ratio - 0.10) / (0.35 - 0.10)).clip(0, 1).fillna(0)
 
-    demand = (vol_trend_score + up_dom_score) * liq_ok
+    # Larry Williams range expansion
+    tr_today = pd.DataFrame({c: true_range(op[c], hi[c], lo[c], cl[c]) for c in cl.columns}).iloc[-1]
+    atr_today = atr14.iloc[-1]
+    tr_atr = (tr_today / (atr_today + 1e-9)).replace([np.inf, -np.inf], np.nan)
+    range_pos = ((cl.iloc[-1] - lo.iloc[-1]) / ((hi.iloc[-1] - lo.iloc[-1]) + 1e-9)).replace([np.inf, -np.inf], np.nan)
+    exp_raw = ((tr_atr - 1.0) / (2.0 - 1.0)).clip(0, 1).fillna(0) * ((range_pos - 0.6) / (1.0 - 0.6)).clip(0, 1).fillna(0)
+    range_expansion_score = 3 * exp_raw
 
-    s20 = px.rolling(20).mean().iloc[-1]
-    s50 = px.rolling(50).mean().iloc[-1]
-    s200 = px.rolling(200).mean().iloc[-1]
+    demand = ((vol_trend_score + absorption_score + range_expansion_score) * liq_ok).clip(0, 15)
+
+    # --- Quality (trend alignment + stability)
+    s20 = px_adj.rolling(20).mean().iloc[-1]
+    s50 = px_adj.rolling(50).mean().iloc[-1]
+    s200 = px_adj.rolling(200).mean().iloc[-1]
     align_full = ((s20 > s50) & (s50 > s200)).astype(float)
     align_mid = ((s20 > s50) | (s50 > s200)).astype(float)
     trend_score = 10 * (0.7 * align_full + 0.3 * align_mid)
 
-    mdd60 = px.apply(lambda s: max_drawdown(s, 60))
+    mdd60 = px_adj.apply(lambda s: max_drawdown(s, 60))
     stab = ((mdd60 - (-0.35)) / ((-0.10) - (-0.35))).clip(0, 1)
     stability_score = 5 * stab.fillna(0)
-    quality = trend_score + stability_score
+    quality = (trend_score + stability_score).clip(0, 15)
 
-    atrp_last = atr14.iloc[-1]
-    atrp_rank = atrp_last.rank(pct=True)
-    vol_pen = -4 * ((atrp_rank - 0.85) / (1.0 - 0.85)).clip(0, 1).fillna(0)
+    # --- Risk Penalty: Wyckoff UT + volatility/liq penalties
+    atrp_rank = atrp14.rank(pct=True)
+    vol_pen = -3 * ((atrp_rank - 0.85) / (1.0 - 0.85)).clip(0, 1).fillna(0)
 
     absr20 = retd.tail(20).abs()
     big_move_freq = (absr20 > 0.12).mean()
-    gap_pen = -4 * ((big_move_freq - 0.05) / (0.20 - 0.05)).clip(0, 1).fillna(0)
+    gap_pen = -2 * ((big_move_freq - 0.05) / (0.20 - 0.05)).clip(0, 1).fillna(0)
+
+    # Wyckoff/Bulkowski UT (upthrust) penalty
+    last10 = px_adj.tail(10)
+    hi10 = hi.tail(10)
+    pivot10 = pivot_roll.tail(10)
+    failed = (hi10 > pivot10) & (last10 < pivot10)
+    fail_freq = failed.mean()
+    ut_pen = -5 * ((fail_freq - 0.10) / (0.40 - 0.10)).clip(0, 1).fillna(0)
 
     liq_pen = -10 * (1 - liq_ok)
 
-    risk_penalty = (vol_pen + gap_pen + liq_pen).clip(-10, 0)
+    risk_penalty = (vol_pen + gap_pen + ut_pen + liq_pen).clip(-10, 0)
 
-    regime = pd.Series(regime_score_0_15, index=px.columns).astype(float)
+    # --- Regime (0..15)
+    regime = pd.Series(regime_score_0_15, index=px_adj.columns).astype(float)
 
-    tma_val = (regime + leadership + base_score + demand + quality + risk_penalty).clip(0, 100)
+    # --- Total TMA
+    tma = (regime + leadership + prox52_score + base_score + demand + quality + risk_penalty).clip(0, 100)
 
     out = pd.DataFrame({
-        "TMA": tma_val,
+        "TMA": tma,
         "Regime": regime,
         "Leadership": leadership,
+        "52W_Bonus": prox52_score,
         "Base": base_score,
         "Demand": demand,
         "Quality": quality,
         "RiskPenalty": risk_penalty,
         "RS6": rs6,
         "RS12": rs12,
-        "Ret_6M": r_6m,
-        "Ret_12M": r_12m,
-        "ATR%_14": atrp_last,
+        "52W_Prox": prox_52w,
         "ContractionRatio": contraction_ratio,
+        "PivotProx": pivot_prox,
         "BoxRange%": box_range_pct,
-        "Close/BoxHigh": close_to_high,
+        "AbsorptionScore": absorption_score,
+        "RangeExpScore": range_expansion_score,
+        "UTPenalty": ut_pen,
         "VolRatio(20/60)": vol_ratio,
         "DollarVol20": dollar_vol20,
+        "ATR%_14": atrp14,
         "MDD_60D": mdd60,
-    })
-    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=["TMA"])
+    }).replace([np.inf, -np.inf], np.nan).dropna(subset=["TMA"])
+
     return out.sort_values("TMA", ascending=False)
 
 
@@ -475,7 +550,7 @@ def load_all_universes() -> pd.DataFrame:
     return allu
 
 
-st.title("📌 TMA Scanner + Momentum Compare")
+st.title("🏆 TMA Scanner (Enhanced)")
 
 try:
     uni = load_all_universes()
@@ -487,12 +562,10 @@ except Exception as e:
 universes: Dict[str, Tuple[pd.DataFrame, List[str]]] = {}
 for u in uni["Universe"].unique():
     sub = uni[uni["Universe"] == u].copy()
-    tickers = sub["Ticker"].tolist()
-    universes[u] = (sub, tickers)
+    universes[u] = (sub, sub["Ticker"].tolist())
 
 u_names = list(universes.keys())
 
-# Membership map: ticker -> "Universe1, Universe2, ..."
 membership = (
     uni.groupby("Ticker")["Universe"]
     .apply(lambda x: ", ".join(sorted(set(x.tolist()))))
@@ -513,23 +586,35 @@ def batched(lst: List[str], n: int) -> List[List[str]]:
     return [lst[i:i + n] for i in range(0, len(lst), n)]
 
 
-px_parts, vol_parts = [], []
+px_parts, vol_parts, op_parts, hi_parts, lo_parts, cl_parts = [], [], [], [], [], []
 with st.spinner("가격/거래량 데이터를 다운로드 중... (무료: yfinance)"):
     for batch in batched(all_tickers, 120):
-        px_b, vol_b = download_ohlcv_yahoo(batch, period=period)
+        px_b, vol_b, op_b, hi_b, lo_b, cl_b = download_yahoo(batch, period=period)
         if not px_b.empty:
             px_parts.append(px_b)
             vol_parts.append(vol_b)
+            op_parts.append(op_b)
+            hi_parts.append(hi_b)
+            lo_parts.append(lo_b)
+            cl_parts.append(cl_b)
         time.sleep(0.15)
 
 if not px_parts:
     st.error("데이터 다운로드 실패. (네트워크/야후 제한/티커 이슈 가능)")
     st.stop()
 
-px_all = pd.concat(px_parts, axis=1)
-vol_all = pd.concat(vol_parts, axis=1)
-px_all = px_all.loc[:, ~px_all.columns.duplicated()].sort_index()
-vol_all = vol_all.loc[:, ~vol_all.columns.duplicated()].sort_index()
+
+def concat_dedup(parts: List[pd.DataFrame]) -> pd.DataFrame:
+    df = pd.concat(parts, axis=1)
+    return df.loc[:, ~df.columns.duplicated()].sort_index()
+
+
+px_all = concat_dedup(px_parts)
+vol_all = concat_dedup(vol_parts)
+op_all = concat_dedup(op_parts)
+hi_all = concat_dedup(hi_parts)
+lo_all = concat_dedup(lo_parts)
+cl_all = concat_dedup(cl_parts)
 
 # Bench series
 spy = px_all["SPY"] if "SPY" in px_all.columns else pd.Series(dtype=float)
@@ -542,14 +627,12 @@ prev_regime_0_15 = compute_regime_score(spy.iloc[:-1], qqq.iloc[:-1])
 # ═══════════════════════ Rank change helper ════════════════════
 
 def build_prev_rank_map(scores_df: pd.DataFrame) -> Dict[str, int]:
-    """Build ticker -> rank (1-based) map from a scores DataFrame sorted desc."""
     if scores_df.empty:
         return {}
     return {ticker: rank for rank, ticker in enumerate(scores_df.index, 1)}
 
 
 def add_rank_columns(out: pd.DataFrame, prev_rank_map: Dict[str, int]) -> pd.DataFrame:
-    """Add Rank and 전일대비 columns to output DataFrame (already has Ticker col)."""
     out = out.copy()
     out["Rank"] = range(1, len(out) + 1)
 
@@ -568,14 +651,38 @@ def add_rank_columns(out: pd.DataFrame, prev_rank_map: Dict[str, int]) -> pd.Dat
     return out
 
 
-# ═══════════════════════ Column format helper ══════════════════
+# ═══════════════════════ OHLCV slice helper ════════════════════
+
+def _get_ohlcv(cols_exist):
+    """Get all 6 OHLCV DataFrames for given ticker columns."""
+    px_u = px_all[cols_exist].copy()
+    vol_u = vol_all.reindex(columns=cols_exist)
+    op_u = op_all.reindex(columns=cols_exist)
+    hi_u = hi_all.reindex(columns=cols_exist)
+    lo_u = lo_all.reindex(columns=cols_exist)
+    cl_u = cl_all.reindex(columns=cols_exist)
+    return px_u, vol_u, op_u, hi_u, lo_u, cl_u
+
+
+def _call_tma(px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, regime):
+    return compute_tma_scores_enhanced(
+        px_adj=px_u, vol=vol_u,
+        op=op_u, hi=hi_u, lo=lo_u, cl=cl_u,
+        benchmark_adj=bench,
+        regime_score_0_15=regime,
+        min_dollar_vol=min_dollar_vol,
+    )
+
+
+# ═══════════════════════ Column format helpers ═════════════════
 
 TMA_SHOW_COLS = [
     "Rank", "전일대비", "Ticker", "Name", "Universes",
     "TMA",
-    "Regime", "Leadership", "Base", "Demand", "Quality", "RiskPenalty",
+    "Regime", "Leadership", "52W_Bonus", "Base", "Demand", "Quality", "RiskPenalty",
     "RS6", "RS12",
-    "ContractionRatio", "BoxRange%", "Close/BoxHigh",
+    "ContractionRatio", "PivotProx", "BoxRange%",
+    "AbsorptionScore", "RangeExpScore", "UTPenalty",
     "VolRatio(20/60)", "DollarVol20",
     "ATR%_14", "MDD_60D",
 ]
@@ -589,14 +696,13 @@ MOM_SHOW_COLS = [
 def tma_fmt(cols) -> dict:
     fmt = {}
     for c in cols:
-        if c in ("TMA", "Regime", "Leadership", "Base", "Demand", "Quality", "RiskPenalty"):
+        if c in ("TMA", "Regime", "Leadership", "52W_Bonus", "Base", "Demand", "Quality",
+                 "RiskPenalty", "AbsorptionScore", "RangeExpScore", "UTPenalty"):
             fmt[c] = "{:.1f}"
-        elif c in ("RS6", "RS12"):
+        elif c in ("RS6", "RS12", "BoxRange%", "ATR%_14", "MDD_60D"):
             fmt[c] = "{:.2%}"
-        elif c in ("ContractionRatio", "Close/BoxHigh", "VolRatio(20/60)"):
+        elif c in ("ContractionRatio", "PivotProx", "VolRatio(20/60)"):
             fmt[c] = "{:.2f}"
-        elif c in ("BoxRange%", "ATR%_14", "MDD_60D"):
-            fmt[c] = "{:.2%}"
         elif c == "DollarVol20":
             fmt[c] = "${:,.0f}"
     return fmt
@@ -616,7 +722,7 @@ def mom_fmt(cols) -> dict:
 
 # ═══════════════════════ Tabs ══════════════════════════════════
 
-tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교"])
+tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교", "ℹ️ 스코어 설명"])
 
 # ── Tab 1: TMA per universe ──
 with tabs[0]:
@@ -624,23 +730,26 @@ with tabs[0]:
     st.info(f"현재 Regime 점수(0~15): **{regime_0_15:.1f}**  (SPY/QQQ 기반)")
 
     def render_tma(universe_name: str, container):
-        sub_df, tickers = universes[universe_name]
-        cols_exist = [t for t in tickers if t in px_all.columns]
+        _, tickers = universes[universe_name]
+        cols_exist = [t for t in tickers if t in px_all.columns and t in vol_all.columns]
         if len(cols_exist) < 10:
             container.warning(f"{universe_name}: 데이터 확보 티커 수가 너무 적습니다.")
             return
 
-        px_u = px_all[cols_exist].copy()
-        vol_u = vol_all[cols_exist].copy()
+        px_u, vol_u, op_u, hi_u, lo_u, cl_u = _get_ohlcv(cols_exist)
         bench = spy.reindex(px_u.index).ffill()
 
-        tma_result = compute_tma_scores(px_u, vol_u, bench, regime_0_15, min_dollar_vol)
+        tma_result = _call_tma(px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, regime_0_15)
         if tma_result.empty:
-            container.warning(f"{universe_name}: TMA 계산 불가(데이터 부족/결측 과다).")
+            container.warning(f"{universe_name}: TMA 계산 불가(데이터 부족/결측).")
             return
 
         # Previous day rankings
-        tma_prev = compute_tma_scores(px_u.iloc[:-1], vol_u.iloc[:-1], bench.iloc[:-1], prev_regime_0_15, min_dollar_vol)
+        tma_prev = _call_tma(
+            px_u.iloc[:-1], vol_u.iloc[:-1], op_u.iloc[:-1],
+            hi_u.iloc[:-1], lo_u.iloc[:-1], cl_u.iloc[:-1],
+            bench.iloc[:-1], prev_regime_0_15,
+        )
         prev_map = build_prev_rank_map(tma_prev)
 
         out = tma_result.head(top_n).reset_index().rename(columns={"index": "Ticker"})
@@ -662,19 +771,22 @@ with tabs[1]:
     st.subheader(f"통합 TMA Top ({len(u_names)}개 유니버스 합산, 중복 제거)")
     st.caption("중복 티커는 하나로 합치고, '어느 유니버스에 속하는지'를 함께 표시합니다.")
 
-    cols_exist = [t for t in uni["Ticker"].unique().tolist() if t in px_all.columns]
+    cols_exist = [t for t in uni["Ticker"].unique().tolist() if t in px_all.columns and t in vol_all.columns]
     if len(cols_exist) < 20:
         st.warning("통합 유니버스 데이터가 부족합니다.")
     else:
-        px_u = px_all[cols_exist].copy()
-        vol_u = vol_all[cols_exist].copy()
+        px_u, vol_u, op_u, hi_u, lo_u, cl_u = _get_ohlcv(cols_exist)
         bench = spy.reindex(px_u.index).ffill()
 
-        tma_all = compute_tma_scores(px_u, vol_u, bench, regime_0_15, min_dollar_vol)
+        tma_all = _call_tma(px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, regime_0_15)
         if tma_all.empty:
-            st.warning("통합 TMA 계산 불가(데이터 부족/결측 과다).")
+            st.warning("통합 TMA 계산 불가(데이터 부족/결측).")
         else:
-            tma_all_prev = compute_tma_scores(px_u.iloc[:-1], vol_u.iloc[:-1], bench.iloc[:-1], prev_regime_0_15, min_dollar_vol)
+            tma_all_prev = _call_tma(
+                px_u.iloc[:-1], vol_u.iloc[:-1], op_u.iloc[:-1],
+                hi_u.iloc[:-1], lo_u.iloc[:-1], cl_u.iloc[:-1],
+                bench.iloc[:-1], prev_regime_0_15,
+            )
             prev_map = build_prev_rank_map(tma_all_prev)
 
             out = tma_all.head(top_n).reset_index().rename(columns={"index": "Ticker"})
@@ -688,10 +800,9 @@ with tabs[1]:
 # ── Tab 3: Momentum comparison ──
 with tabs[2]:
     st.subheader("모멘텀 랭킹 비교 (유니버스별)")
-    cols = st.columns(2)
 
     def render_momentum(universe_name: str, container):
-        sub_df, tickers = universes[universe_name]
+        _, tickers = universes[universe_name]
         cols_exist = [t for t in tickers if t in px_all.columns]
         if len(cols_exist) < 10:
             container.warning(f"{universe_name}: 데이터 확보 티커 수가 너무 적습니다.")
@@ -700,10 +811,9 @@ with tabs[2]:
         px_u = px_all[cols_exist].copy()
         mom = compute_momentum_scores(px_u, method=mom_method)
         if mom.empty:
-            container.warning(f"{universe_name}: 모멘텀 계산 불가(데이터 부족/결측 과다).")
+            container.warning(f"{universe_name}: 모멘텀 계산 불가(데이터 부족/결측).")
             return
 
-        # Previous day rankings
         mom_prev = compute_momentum_scores(px_u.iloc[:-1], method=mom_method)
         prev_map = build_prev_rank_map(mom_prev)
 
@@ -720,3 +830,39 @@ with tabs[2]:
         if i % 2 == 0:
             mom_cols = st.columns(2)
         render_momentum(uname, mom_cols[i % 2])
+
+# ── Tab 4: Score explanation ──
+with tabs[3]:
+    st.subheader("TMA(Enhanced) 스코어 구성 설명")
+    st.markdown(
+        """
+기존 TMA 스캐너(리더십/베이스/수급/퀄리티/리스크)에 아래를 추가 반영했습니다.
+
+---
+
+### Wyckoff
+- **AbsorptionScore** (0~6): 박스/피벗 상단 근처에서 '상승일 거래량'이 많이 나타날수록 가점 (흡수/매집 프록시)
+- **UTPenalty** (0~-5): 최근 10일 중 '상단 찌르고 종가가 다시 상단 아래로' 자주 발생하면 감점 (Upthrust/가짜 돌파)
+
+### Larry Williams
+- **RangeExpScore** (0~3): True Range가 ATR 대비 커지고(확장), 종가가 당일 범위 상단에 위치할수록 가점 (확장 타이밍)
+
+### Thomas Bulkowski
+- **BaseDepthPen** (0~-5): 베이스 폭(60D 고저폭)이 35% 초과시 감점 (실패 확률 증가)
+- **BaseLengthScore** (0~3): 최근 80일 동안 박스 밴드 내 체류 비중이 높으면 가점 (적정 길이/구조 프록시)
+
+### Jesse Livermore
+- **52W_Bonus** (0~5): 52주 신고가 근접할수록 가점 (진짜 리더 우대)
+- **PivotProx**: 60D pivot(저항)에 가까울수록 가점 (결정적 가격 근접)
+
+---
+
+### 기타 변경사항
+- **ATR**: 기존 `close.diff()` 방식에서 진정한 **True Range (OHLC)** 기반으로 변경
+- **VCP Score**: 15 → 12로 축소 (Bulkowski 지표에 배분)
+- **Volume Trend**: 10 → 6으로 축소 (Absorption/Range Expansion에 배분)
+- **최소 데이터**: 260일 → 320일로 상향 (52주 고점 등 추가 지표 필요)
+
+> 스캐너(A) 목적이라 "진입/청산 규칙" 대신 **후보의 질(quality)과 실패회피(anti-failure)**에 집중했습니다.
+"""
+    )
