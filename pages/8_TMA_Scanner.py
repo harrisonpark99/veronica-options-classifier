@@ -11,6 +11,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
+import plotly.express as plotly_ex
 import requests
 import streamlit as st
 import yfinance as yf
@@ -160,6 +161,43 @@ def fetch_sp500() -> pd.DataFrame:
             out["Universe"] = "S&P 500"
             return out.reset_index(drop=True)
     raise ValueError("S&P 500 components table not found (Wikipedia layout changed).")
+
+
+# ═══════════════════════ Sector & Market Cap ══════════════════
+
+@st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
+def fetch_sector_map() -> Dict[str, str]:
+    """GICS Sector mapping from S&P 500 Wikipedia page."""
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    tables = safe_read_html(url)
+    for df in tables:
+        cols = [str(c).lower() for c in df.columns]
+        if any("symbol" in c for c in cols):
+            df.columns = [str(c) for c in df.columns]
+            sym_col = next((c for c in df.columns if "symbol" in c.lower()), None)
+            sec_col = next(
+                (c for c in df.columns if "sector" in c.lower() and "sub" not in c.lower()),
+                None,
+            )
+            if sym_col and sec_col:
+                return {
+                    str(row[sym_col]).strip().upper(): str(row[sec_col]).strip()
+                    for _, row in df.iterrows()
+                }
+    return {}
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def fetch_market_caps(tickers_tuple: tuple) -> Dict[str, float]:
+    """Fetch market caps via yfinance .info (cached 6 h)."""
+    caps: Dict[str, float] = {}
+    for t in tickers_tuple:
+        try:
+            info = yf.Ticker(to_yahoo_ticker(t)).info
+            caps[t] = float(info.get("marketCap", 0) or 0)
+        except Exception:
+            caps[t] = 0.0
+    return caps
 
 
 # ═══════════════════════ Data Download (OHLCV) ═════════════════
@@ -837,7 +875,9 @@ def mom_fmt(cols) -> dict:
 
 # ═══════════════════════ Tabs ══════════════════════════════════
 
-tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교"])
+_unified_tma = pd.DataFrame()  # populated in Tab 2, used by heatmap tab
+
+tabs = st.tabs(["🏆 TMA (유니버스별)", "🌐 통합 TMA Top", "📈 모멘텀 비교", "🗺️ 섹터 히트맵"])
 
 # ── Tab 1: TMA per universe ──
 with tabs[0]:
@@ -907,6 +947,8 @@ with tabs[1]:
                 tma_all["StreakBonus"] = tma_all["StreakDays"] * streak_bonus_per_day
                 tma_all["TMA"] = tma_all["TMA"] + tma_all["StreakBonus"]
                 tma_all = tma_all.sort_values("TMA", ascending=False)
+
+            _unified_tma = tma_all  # share with heatmap tab
 
             # Previous day ranking (raw TMA, streak 미적용)
             tma_all_prev = _call_tma(
@@ -1017,4 +1059,89 @@ with tabs[2]:
         if i % 2 == 0:
             mom_cols = st.columns(2)
         render_momentum(uname, mom_cols[i % 2])
+
+# ── Tab 4: Sector heatmap ──
+with tabs[3]:
+    st.subheader("🗺️ TMA Top 50 — 섹터 시총 히트맵")
+
+    if _unified_tma.empty:
+        st.warning("통합 TMA 데이터가 없습니다. '통합 TMA Top' 탭 결과를 확인하세요.")
+    else:
+        _top50 = _unified_tma.head(50)
+        _tickers50 = _top50.index.tolist()
+
+        # Sector from Wikipedia (fast, cached 12 h)
+        _sector_map = fetch_sector_map()
+
+        # Market cap from yfinance (cached 6 h)
+        with st.spinner("시가총액 데이터 조회 중 (최초 1회만 소요)..."):
+            _mcap_map = fetch_market_caps(tuple(_tickers50))
+
+        _hm_rows = []
+        for _t in _tickers50:
+            mc = _mcap_map.get(_t, 0)
+            if mc <= 0:
+                continue
+            _hm_rows.append({
+                "Ticker": _t,
+                "Name": name_map.get(_t, ""),
+                "Sector": _sector_map.get(_t, "기타"),
+                "TMA": float(_top50.loc[_t, "TMA"]),
+                "MarketCap": mc,
+            })
+
+        _hm_df = pd.DataFrame(_hm_rows)
+
+        if _hm_df.empty:
+            st.warning("시가총액 데이터를 가져올 수 없습니다.")
+        else:
+            _hm_df["MarketCap_B"] = _hm_df["MarketCap"] / 1e9
+            _hm_df["TileLabel"] = _hm_df.apply(
+                lambda r: f"{r['Ticker']}\nTMA {r['TMA']:.1f}", axis=1,
+            )
+
+            fig = plotly_ex.treemap(
+                _hm_df,
+                path=[plotly_ex.Constant("TMA Top 50"), "Sector", "TileLabel"],
+                values="MarketCap_B",
+                color="TMA",
+                color_continuous_scale="RdYlGn",
+                color_continuous_midpoint=_hm_df["TMA"].median(),
+            )
+            fig.update_layout(
+                height=750,
+                margin=dict(t=40, l=5, r=5, b=5),
+                coloraxis_colorbar=dict(title="TMA Score"),
+            )
+            fig.update_traces(
+                hovertemplate=(
+                    "<b>%{label}</b><br>"
+                    "시총: $%{value:.1f}B<br>"
+                    "<extra></extra>"
+                ),
+                textfont_size=11,
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── Sector summary table ──
+            st.markdown("---")
+            st.subheader("섹터별 요약")
+            _sec_sum = (
+                _hm_df.groupby("Sector")
+                .agg(
+                    종목수=("Ticker", "count"),
+                    평균TMA=("TMA", "mean"),
+                    최고TMA=("TMA", "max"),
+                    총시총_B=("MarketCap_B", "sum"),
+                )
+                .sort_values("평균TMA", ascending=False)
+                .round(1)
+            )
+            _sec_sum.index.name = "섹터"
+            st.dataframe(
+                _sec_sum.style.format(
+                    {"평균TMA": "{:.1f}", "최고TMA": "{:.1f}", "총시총_B": "${:.1f}B"}
+                ),
+                use_container_width=True,
+            )
 
