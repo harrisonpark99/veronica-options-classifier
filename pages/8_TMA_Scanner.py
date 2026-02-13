@@ -746,15 +746,22 @@ def compute_signals(tma_df):
         & (tma_df["UTPenalty"] >= -1.0)
     ).astype(int)
 
-    # ── Exit tranches (3분할 청산) ──
-    sig["X1_품질악화"] = (
-        (tma_df["Quality"] < 8.0) | (tma_df["MDD_60D"] < -0.20)
+    # ── Exit tranches (3분할 청산) — tight stop ──
+    atrp_rank = tma_df["ATR%_14"].rank(pct=True)
+    sig["X1_경고"] = (
+        (tma_df["Quality"] < 10.0)
+        | (tma_df["MDD_60D"] < -0.08)
+        | (atrp_rank >= 0.80)
     ).astype(int)
-    sig["X2_모멘텀약화"] = (
-        (pctile < 0.60) | (tma_df["Leadership"] < 10.0)
+    sig["X2_주의"] = (
+        (pctile < 0.75)
+        | (tma_df["Leadership"] < 15.0)
+        | (tma_df["PivotProx"] < 0.90)
     ).astype(int)
     sig["X3_전량청산"] = (
-        (pctile < 0.50) | (tma_df["RiskPenalty"] < -5.0)
+        (pctile < 0.65)
+        | (tma_df["RiskPenalty"] < -3.0)
+        | (tma_df["MDD_60D"] < -0.15)
     ).astype(int)
 
     entry_cols = [c for c in sig.columns if c.startswith("E")]
@@ -932,7 +939,7 @@ with tabs[1]:
                 "진입시그널", "청산시그널",
                 "E1_TMA상위", "E2_베이스", "E3_수요확인",
                 "E4_추세확인", "E5_돌파확인",
-                "X1_품질악화", "X2_모멘텀약화", "X3_전량청산",
+                "X1_경고", "X2_주의", "X3_전량청산",
             ]
             for c in sig_cols:
                 if c in sig_top.columns:
@@ -943,7 +950,7 @@ with tabs[1]:
                 "진입시그널", "청산시그널",
                 "E1_TMA상위", "E2_베이스", "E3_수요확인",
                 "E4_추세확인", "E5_돌파확인",
-                "X1_품질악화", "X2_모멘텀약화", "X3_전량청산",
+                "X1_경고", "X2_주의", "X3_전량청산",
             ]
             sig_display = sig_display[[c for c in sig_show if c in sig_display.columns]]
 
@@ -961,13 +968,13 @@ with tabs[1]:
 | E4\_추세확인 | Quality ≥ 10 & MDD\_60D > -15% | MA 정배열 + 안정적 추세 |
 | E5\_돌파확인 | PivotProx > 0.97 & RangeExpScore > 1.5 & UTPenalty ≥ -1 | 고점 돌파 시도 + 레인지 확장 |
 
-**청산 트리거 (3분할) — 조건 충족 시 해당 분할만큼 매도:**
+**청산 트리거 (3분할) — 조건 충족 시 해당 분할만큼 매도 (Tight Stop):**
 
 | 트리거 | 조건 | 의미 |
 |--------|------|------|
-| X1\_품질악화 | Quality < 8 또는 MDD\_60D < -20% | 추세 붕괴 또는 낙폭 과대 |
-| X2\_모멘텀약화 | TMA 하위 40% 또는 Leadership < 10 | 상대강도 약화 |
-| X3\_전량청산 | TMA 하위 50% 또는 RiskPenalty < -5 | 심각한 리스크 발생 |
+| X1\_경고 | Quality < 10 또는 MDD\_60D < -8% 또는 ATR% 상위 20% | 품질 저하·낙폭 초기·변동성 급등 |
+| X2\_주의 | TMA 하위 25% 또는 Leadership < 15 또는 PivotProx < 0.90 | 모멘텀 약화·피봇 이탈 |
+| X3\_전량청산 | TMA 하위 35% 또는 RiskPenalty < -3 또는 MDD < -15% | 심각한 리스크·즉시 청산 |
 
 **활용 예시:**
 - 진입 1/5: E1만 충족 → 20% 포지션 진입
