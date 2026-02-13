@@ -1077,6 +1077,15 @@ with tabs[3]:
         with st.spinner("시가총액 데이터 조회 중 (최초 1회만 소요)..."):
             _mcap_map = fetch_market_caps(tuple(_tickers50))
 
+        # Daily return from price data
+        _daily_ret = {}
+        for _t in _tickers50:
+            if _t in px_all.columns and len(px_all[_t].dropna()) >= 2:
+                _s = px_all[_t].dropna()
+                _daily_ret[_t] = float((_s.iloc[-1] / _s.iloc[-2]) - 1.0)
+            else:
+                _daily_ret[_t] = 0.0
+
         _hm_rows = []
         for _t in _tickers50:
             mc = _mcap_map.get(_t, 0)
@@ -1087,6 +1096,7 @@ with tabs[3]:
                 "Name": name_map.get(_t, ""),
                 "Sector": _sector_map.get(_t, "기타"),
                 "TMA": float(_top50.loc[_t, "TMA"]),
+                "DailyRet": _daily_ret.get(_t, 0.0),
                 "MarketCap": mc,
             })
 
@@ -1096,22 +1106,26 @@ with tabs[3]:
             st.warning("시가총액 데이터를 가져올 수 없습니다.")
         else:
             _hm_df["MarketCap_B"] = _hm_df["MarketCap"] / 1e9
+            _hm_df["DailyPct"] = _hm_df["DailyRet"] * 100  # for display
             _hm_df["TileLabel"] = _hm_df.apply(
-                lambda r: f"{r['Ticker']}\nTMA {r['TMA']:.1f}", axis=1,
+                lambda r: f"{r['Ticker']}\n{r['DailyPct']:+.2f}%", axis=1,
             )
+
+            _cmax = max(abs(_hm_df["DailyPct"].min()), abs(_hm_df["DailyPct"].max()), 0.5)
 
             fig = plotly_ex.treemap(
                 _hm_df,
                 path=[plotly_ex.Constant("TMA Top 50"), "Sector", "TileLabel"],
                 values="MarketCap_B",
-                color="TMA",
+                color="DailyPct",
                 color_continuous_scale="RdYlGn",
-                color_continuous_midpoint=_hm_df["TMA"].median(),
+                color_continuous_midpoint=0,
+                range_color=[-_cmax, _cmax],
             )
             fig.update_layout(
                 height=750,
                 margin=dict(t=40, l=5, r=5, b=5),
-                coloraxis_colorbar=dict(title="TMA Score"),
+                coloraxis_colorbar=dict(title="전일대비 %", ticksuffix="%"),
             )
             fig.update_traces(
                 hovertemplate=(
@@ -1130,17 +1144,17 @@ with tabs[3]:
                 _hm_df.groupby("Sector")
                 .agg(
                     종목수=("Ticker", "count"),
+                    평균등락=("DailyPct", "mean"),
                     평균TMA=("TMA", "mean"),
-                    최고TMA=("TMA", "max"),
                     총시총_B=("MarketCap_B", "sum"),
                 )
-                .sort_values("평균TMA", ascending=False)
-                .round(1)
+                .sort_values("평균등락", ascending=False)
+                .round(2)
             )
             _sec_sum.index.name = "섹터"
             st.dataframe(
                 _sec_sum.style.format(
-                    {"평균TMA": "{:.1f}", "최고TMA": "{:.1f}", "총시총_B": "${:.1f}B"}
+                    {"평균등락": "{:+.2f}%", "평균TMA": "{:.1f}", "총시총_B": "${:.1f}B"}
                 ),
                 use_container_width=True,
             )
