@@ -529,6 +529,14 @@ with st.sidebar:
         index=0,
     )
 
+    st.markdown("---")
+    st.subheader("체류 가중치")
+    use_streak = st.toggle("체류 가중치 적용", value=True)
+    streak_lookback = st.slider("체류 체크 기간 (거래일)", 3, 10, 5) if use_streak else 5
+    streak_bonus_per_day = st.slider("체류일당 가점", 0.5, 2.0, 1.0, 0.5) if use_streak else 1.0
+    if use_streak:
+        st.caption(f"최근 {streak_lookback}일간 Top 20%에 연속 체류한 일수 × {streak_bonus_per_day}점 가산")
+
     st.caption("유니버스: Dow 30 / S&P 100 / Nasdaq 100 / S&P 500 (Wikipedia 기반)")
     st.markdown("---")
     if st.button("Clear Cache", use_container_width=True):
@@ -674,11 +682,108 @@ def _call_tma(px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, regime):
     )
 
 
+# ═══════════════════════ Streak bonus helper ══════════════════
+
+def compute_streak(px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, lookback):
+    """
+    Count consecutive Top-20% residency days (from yesterday backward).
+    Returns pd.Series indexed by ticker with streak day count.
+    """
+    top20_sets = []
+    for d in range(1, lookback + 1):
+        if len(px_u) <= d + 320:
+            top20_sets.append(set())
+            continue
+        tma_d = _call_tma(
+            px_u.iloc[:-d], vol_u.iloc[:-d], op_u.iloc[:-d],
+            hi_u.iloc[:-d], lo_u.iloc[:-d], cl_u.iloc[:-d],
+            bench.iloc[:-d],
+            compute_regime_score(spy.iloc[:-d], qqq.iloc[:-d]),
+        )
+        if tma_d.empty:
+            top20_sets.append(set())
+            continue
+        n_top = max(1, int(len(tma_d) * 0.20))
+        top20_sets.append(set(tma_d.head(n_top).index))
+
+    streak = {}
+    for ticker in px_u.columns:
+        count = 0
+        for s in top20_sets:
+            if ticker in s:
+                count += 1
+            else:
+                break
+        streak[ticker] = count
+
+    return pd.Series(streak)
+
+
+# ═══════════════════════ Entry / Exit Signals ═════════════════
+
+def compute_signals(tma_df):
+    """Compute 5-tranche entry and 3-tranche exit trigger signals."""
+    if tma_df.empty:
+        return pd.DataFrame()
+
+    pctile = tma_df["TMA"].rank(pct=True)
+    sig = pd.DataFrame(index=tma_df.index)
+
+    # ── Entry tranches (5분할 진입) ──
+    sig["E1_TMA상위"] = (pctile >= 0.80).astype(int)
+    sig["E2_베이스"] = (
+        (tma_df["ContractionRatio"] < 0.80) & (tma_df["PivotProx"] > 0.92)
+    ).astype(int)
+    sig["E3_수요확인"] = (
+        (tma_df["AbsorptionScore"] >= 3.0) & (tma_df["VolRatio(20/60)"] > 1.0)
+    ).astype(int)
+    sig["E4_추세확인"] = (
+        (tma_df["Quality"] >= 10.0) & (tma_df["MDD_60D"] > -0.15)
+    ).astype(int)
+    sig["E5_돌파확인"] = (
+        (tma_df["PivotProx"] > 0.97)
+        & (tma_df["RangeExpScore"] > 1.5)
+        & (tma_df["UTPenalty"] >= -1.0)
+    ).astype(int)
+
+    # ── Exit tranches (3분할 청산) ──
+    sig["X1_품질악화"] = (
+        (tma_df["Quality"] < 8.0) | (tma_df["MDD_60D"] < -0.20)
+    ).astype(int)
+    sig["X2_모멘텀약화"] = (
+        (pctile < 0.60) | (tma_df["Leadership"] < 10.0)
+    ).astype(int)
+    sig["X3_전량청산"] = (
+        (pctile < 0.50) | (tma_df["RiskPenalty"] < -5.0)
+    ).astype(int)
+
+    entry_cols = [c for c in sig.columns if c.startswith("E")]
+    exit_cols = [c for c in sig.columns if c.startswith("X")]
+    sig["EntryCount"] = sig[entry_cols].sum(axis=1).astype(int)
+    sig["ExitCount"] = sig[exit_cols].sum(axis=1).astype(int)
+
+    def _bar(n, total):
+        return "\u2588" * int(n) + "\u2591" * (total - int(n))
+
+    sig["\uc9c4\uc785\uc2dc\uadf8\ub110"] = sig["EntryCount"].apply(
+        lambda n: f"{int(n)}/5 {_bar(n, 5)}"
+    )
+    sig["\uccad\uc0b0\uc2dc\uadf8\ub110"] = sig["ExitCount"].apply(
+        lambda n: f"{int(n)}/3 {_bar(n, 3)}"
+    )
+
+    # Convert 0/1 to visual markers for display
+    for c in entry_cols + exit_cols:
+        sig[c] = sig[c].map({1: "\u2713", 0: ""})
+
+    return sig
+
+
 # ═══════════════════════ Column format helpers ═════════════════
 
 TMA_SHOW_COLS = [
     "Rank", "전일대비", "Ticker", "Name", "Universes",
-    "TMA",
+    "TMA", "StreakDays", "StreakBonus",
     "Regime", "Leadership", "52W_Bonus", "Base", "Demand", "Quality", "RiskPenalty",
     "RS6", "RS12",
     "ContractionRatio", "PivotProx", "BoxRange%",
@@ -697,8 +802,11 @@ def tma_fmt(cols) -> dict:
     fmt = {}
     for c in cols:
         if c in ("TMA", "Regime", "Leadership", "52W_Bonus", "Base", "Demand", "Quality",
-                 "RiskPenalty", "AbsorptionScore", "RangeExpScore", "UTPenalty"):
+                 "RiskPenalty", "AbsorptionScore", "RangeExpScore", "UTPenalty",
+                 "StreakBonus"):
             fmt[c] = "{:.1f}"
+        elif c == "StreakDays":
+            fmt[c] = "{:.0f}"
         elif c in ("RS6", "RS12", "BoxRange%", "ATR%_14", "MDD_60D"):
             fmt[c] = "{:.2%}"
         elif c in ("ContractionRatio", "PivotProx", "VolRatio(20/60)"):
@@ -782,6 +890,18 @@ with tabs[1]:
         if tma_all.empty:
             st.warning("통합 TMA 계산 불가(데이터 부족/결측).")
         else:
+            # ── Streak bonus (통합 탭 전용) ──
+            if use_streak:
+                with st.spinner(f"체류 가중치 계산 중 (최근 {streak_lookback}일)..."):
+                    streak_s = compute_streak(
+                        px_u, vol_u, op_u, hi_u, lo_u, cl_u, bench, streak_lookback,
+                    )
+                tma_all["StreakDays"] = streak_s.reindex(tma_all.index).fillna(0).astype(int)
+                tma_all["StreakBonus"] = tma_all["StreakDays"] * streak_bonus_per_day
+                tma_all["TMA"] = tma_all["TMA"] + tma_all["StreakBonus"]
+                tma_all = tma_all.sort_values("TMA", ascending=False)
+
+            # Previous day ranking (raw TMA, streak 미적용)
             tma_all_prev = _call_tma(
                 px_u.iloc[:-1], vol_u.iloc[:-1], op_u.iloc[:-1],
                 hi_u.iloc[:-1], lo_u.iloc[:-1], cl_u.iloc[:-1],
@@ -796,6 +916,66 @@ with tabs[1]:
             out = out[[c for c in TMA_SHOW_COLS if c in out.columns]]
 
             st.dataframe(out.style.format(tma_fmt(out.columns)), use_container_width=True)
+
+            # ── Entry / Exit Signal Table ──
+            st.markdown("---")
+            st.subheader("📊 분할 진입/청산 시그널")
+            st.caption("TMA 구성요소 기반 — 진입 5분할 / 청산 3분할 트리거 현황")
+
+            signals = compute_signals(tma_all)
+            sig_top = signals.reindex(tma_all.head(top_n).index)
+
+            sig_display = tma_all.head(top_n).reset_index().rename(columns={"index": "Ticker"})
+            sig_display["Name"] = sig_display["Ticker"].map(name_map).fillna("")
+
+            sig_cols = [
+                "진입시그널", "청산시그널",
+                "E1_TMA상위", "E2_베이스", "E3_수요확인",
+                "E4_추세확인", "E5_돌파확인",
+                "X1_품질악화", "X2_모멘텀약화", "X3_전량청산",
+            ]
+            for c in sig_cols:
+                if c in sig_top.columns:
+                    sig_display[c] = sig_top[c].values
+
+            sig_show = [
+                "Ticker", "Name", "TMA",
+                "진입시그널", "청산시그널",
+                "E1_TMA상위", "E2_베이스", "E3_수요확인",
+                "E4_추세확인", "E5_돌파확인",
+                "X1_품질악화", "X2_모멘텀약화", "X3_전량청산",
+            ]
+            sig_display = sig_display[[c for c in sig_show if c in sig_display.columns]]
+
+            st.dataframe(sig_display.style.format({"TMA": "{:.1f}"}), use_container_width=True)
+
+            with st.expander("진입/청산 트리거 기준 설명"):
+                st.markdown("""
+**진입 트리거 (5분할) — 조건 충족 시 해당 분할만큼 매수:**
+
+| 트리거 | 조건 | 의미 |
+|--------|------|------|
+| E1\_TMA상위 | TMA 상위 20% | TMA 종합점수 기준 상위권 진입 |
+| E2\_베이스 | ContractionRatio < 0.80 & PivotProx > 0.92 | 변동성 수축 + 피봇 근접 (VCP 패턴) |
+| E3\_수요확인 | AbsorptionScore ≥ 3.0 & VolRatio > 1.0 | Wyckoff 흡수 + 거래량 증가 |
+| E4\_추세확인 | Quality ≥ 10 & MDD\_60D > -15% | MA 정배열 + 안정적 추세 |
+| E5\_돌파확인 | PivotProx > 0.97 & RangeExpScore > 1.5 & UTPenalty ≥ -1 | 고점 돌파 시도 + 레인지 확장 |
+
+**청산 트리거 (3분할) — 조건 충족 시 해당 분할만큼 매도:**
+
+| 트리거 | 조건 | 의미 |
+|--------|------|------|
+| X1\_품질악화 | Quality < 8 또는 MDD\_60D < -20% | 추세 붕괴 또는 낙폭 과대 |
+| X2\_모멘텀약화 | TMA 하위 40% 또는 Leadership < 10 | 상대강도 약화 |
+| X3\_전량청산 | TMA 하위 50% 또는 RiskPenalty < -5 | 심각한 리스크 발생 |
+
+**활용 예시:**
+- 진입 1/5: E1만 충족 → 20% 포지션 진입
+- 진입 3/5: E1+E2+E3 충족 → 60% 포지션
+- 진입 5/5: 모든 트리거 충족 → 풀 포지션 (100%)
+- 청산 1/3: X1 충족 → 보유분의 1/3 청산
+- 청산 3/3: 모든 트리거 충족 → 전량 청산
+""")
 
 # ── Tab 3: Momentum comparison ──
 with tabs[2]:
