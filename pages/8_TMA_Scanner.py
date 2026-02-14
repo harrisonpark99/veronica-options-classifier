@@ -25,7 +25,7 @@ os.environ["SSL_CERT_FILE"] = certifi.where()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.auth import require_auth, show_logout_button
+from utils.auth import require_auth, show_logout_button, check_auth, get_app_password
 
 # ═══════════════════════ Page Config ═══════════════════════════
 st.set_page_config(
@@ -557,20 +557,44 @@ def load_all_universes() -> pd.DataFrame:
     return allu
 
 
-# ═══════════════════════ Pre-load (before auth) ══════════════
-# Trigger cached downloads while login page is shown, so data is
-# ready the moment the user logs in.
-try:
-    _pre_uni = load_all_universes()
-    _pre_tickers = sorted(set(_pre_uni["Ticker"].tolist() + ["SPY", "QQQ"]))
-    with st.spinner("데이터 사전 로딩 중..."):
-        for _b in batched(_pre_tickers, 120):
-            download_yahoo(_b, period="2y")
-            time.sleep(0.15)
-except Exception:
-    pass  # non-fatal; will retry after auth
+# ═══════════════════════ Parallel Auth + Pre-load ═════════════
+# Login form renders FIRST so user can type password while data
+# downloads in the spinner below.  Every batch that finishes is
+# cached — even if the user clicks Login mid-download, subsequent
+# reruns only need to fetch the remaining batches.
 
-require_auth()
+if not check_auth():
+    st.markdown("### 🔐 TMA Scanner")
+    _pw = st.text_input(
+        "Password", type="password",
+        placeholder="패스워드를 입력하세요", key="tma_page_pw",
+    )
+    _col_btn, _ = st.columns([1, 3])
+    with _col_btn:
+        if st.button("로그인", key="tma_page_login", type="primary", use_container_width=True):
+            _app_pw = get_app_password()
+            if _pw == _app_pw and _app_pw:
+                st.session_state.auth_ok = True
+                st.rerun()
+            else:
+                st.error("패스워드가 올바르지 않습니다.")
+
+    # Data pre-load runs WHILE login form is interactive above
+    st.markdown("---")
+    try:
+        _pre_uni = load_all_universes()
+        _pre_tickers = sorted(set(_pre_uni["Ticker"].tolist() + ["SPY", "QQQ"]))
+        with st.status("📊 데이터 사전 로딩 중...", expanded=False) as _status:
+            _total = len(batched(_pre_tickers, 120))
+            for _i, _b in enumerate(batched(_pre_tickers, 120), 1):
+                _status.update(label=f"📊 데이터 사전 로딩 중... ({_i}/{_total})")
+                download_yahoo(_b, period="2y")
+                time.sleep(0.15)
+            _status.update(label="✅ 데이터 준비 완료 — 위에서 로그인하세요!", state="complete")
+    except Exception:
+        pass
+
+    st.stop()
 
 # ═══════════════════════ Sidebar ══════════════════════════════
 with st.sidebar:
