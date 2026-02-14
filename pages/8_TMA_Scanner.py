@@ -34,7 +34,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-require_auth()
 
 # ═══════════════════════ Config / Utils ════════════════════════
 USER_AGENT = (
@@ -84,6 +83,10 @@ def minmax01(s: pd.Series) -> pd.Series:
 
 def pct_rank(s: pd.Series) -> pd.Series:
     return s.rank(pct=True)
+
+
+def batched(lst: List[str], n: int) -> List[List[str]]:
+    return [lst[i:i + n] for i in range(0, len(lst), n)]
 
 
 # ═══════════════════════ Universe Fetchers ═════════════════════
@@ -540,6 +543,35 @@ def compute_tma_scores_enhanced(
     return out.sort_values("TMA", ascending=False)
 
 
+# ═══════════════════════ Load Universes ════════════════════════
+
+@st.cache_data(ttl=60 * 60, show_spinner=False)
+def load_all_universes() -> pd.DataFrame:
+    u1 = fetch_dow30()
+    u2 = fetch_sp100()
+    u3 = fetch_nasdaq100()
+    u4 = fetch_sp500()
+    allu = pd.concat([u1, u2, u3, u4], ignore_index=True)
+    allu["Ticker"] = allu["Ticker"].astype(str).str.strip().str.upper()
+    allu["Name"] = allu["Name"].astype(str).str.strip()
+    return allu
+
+
+# ═══════════════════════ Pre-load (before auth) ══════════════
+# Trigger cached downloads while login page is shown, so data is
+# ready the moment the user logs in.
+try:
+    _pre_uni = load_all_universes()
+    _pre_tickers = sorted(set(_pre_uni["Ticker"].tolist() + ["SPY", "QQQ"]))
+    with st.spinner("데이터 사전 로딩 중..."):
+        for _b in batched(_pre_tickers, 120):
+            download_yahoo(_b, period="2y")
+            time.sleep(0.15)
+except Exception:
+    pass  # non-fatal; will retry after auth
+
+require_auth()
+
 # ═══════════════════════ Sidebar ══════════════════════════════
 with st.sidebar:
     st.header("VERONICA")
@@ -582,20 +614,6 @@ with st.sidebar:
         st.success("Cache cleared.")
 
 
-# ═══════════════════════ Load Universes ════════════════════════
-
-@st.cache_data(ttl=60 * 60, show_spinner=False)
-def load_all_universes() -> pd.DataFrame:
-    u1 = fetch_dow30()
-    u2 = fetch_sp100()
-    u3 = fetch_nasdaq100()
-    u4 = fetch_sp500()
-    allu = pd.concat([u1, u2, u3, u4], ignore_index=True)
-    allu["Ticker"] = allu["Ticker"].astype(str).str.strip().str.upper()
-    allu["Name"] = allu["Name"].astype(str).str.strip()
-    return allu
-
-
 st.title("🏆 TMA Scanner (Enhanced)")
 
 try:
@@ -626,10 +644,6 @@ name_map = (
 # Download prices once (tickers + benchmarks)
 bench_tickers = ["SPY", "QQQ"]
 all_tickers = sorted(set(uni["Ticker"].tolist() + bench_tickers))
-
-
-def batched(lst: List[str], n: int) -> List[List[str]]:
-    return [lst[i:i + n] for i in range(0, len(lst), n)]
 
 
 px_parts, vol_parts, op_parts, hi_parts, lo_parts, cl_parts = [], [], [], [], [], []
