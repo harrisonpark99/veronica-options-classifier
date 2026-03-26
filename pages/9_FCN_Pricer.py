@@ -190,18 +190,58 @@ def run_mc(params: FCNParams, seed: int = 42) -> dict:
     }
 
 
-def fair_coupon_pa(params: FCNParams, target_npv: float = 1.0) -> float:
-    n_steps = params.tenor_m * 21
-    Z = _generate_Z(params.n_paths, n_steps, seed=42)
-    lo, hi = 0.0, 5.0
+def _bisect(Z: np.ndarray, params: FCNParams, field: str,
+            lo: float, hi: float, target_npv: float = 1.0) -> float:
+    """공통난수 Z로 field를 이진탐색, NPV = target_npv 만족하는 값 반환"""
     for _ in range(60):
         mid = (lo + hi) / 2
-        p = _replace(params, coupon_pa=mid)
+        p = _replace(params, **{field: mid})
         if _mc_from_Z(Z, p) < target_npv:
             lo = mid
         else:
             hi = mid
     return (lo + hi) / 2
+
+
+def fair_coupon_pa(params: FCNParams, target_npv: float = 1.0) -> float:
+    Z = _generate_Z(params.n_paths, params.tenor_m * 21, seed=42)
+    return _bisect(Z, params, "coupon_pa", 0.0, 5.0, target_npv)
+
+
+def fair_strike(params: FCNParams, target_npv: float = 1.0) -> float:
+    """목표 쿠폰 고정 → NPV = target 이 되는 Strike (K_pct) 역산
+    Strike ↑ → 투자자 위험 ↑ → 쿠폰 ↑ → at-par NPV 충족
+    Strike 범위: KI_pct + 0.01 ~ 1.05
+    """
+    Z = _generate_Z(params.n_paths, params.tenor_m * 21, seed=42)
+    lo, hi = params.KI_pct + 0.01, 1.05
+    # NPV는 Strike에 대해 단조 감소 (Strike 낮을수록 손실 가능성 낮아 NPV 높음)
+    # → lo=KI+0.01에서 NPV 최대, hi=1.05에서 NPV 최소
+    if _mc_from_Z(Z, _replace(params, K_pct=lo)) < target_npv:
+        return lo  # 이미 lo에서도 NPV < target → 해 없음
+    return _bisect(Z, params, "K_pct", lo, hi, target_npv)
+
+
+def fair_ki(params: FCNParams, target_npv: float = 1.0) -> float:
+    """목표 쿠폰 고정 → NPV = target 이 되는 KI Barrier (KI_pct) 역산
+    KI ↑ → 위험 ↑ → 쿠폰 증가 효과 → at-par NPV 충족하려면 KI 낮춰야
+    KI 범위: 0.30 ~ K_pct - 0.01
+    """
+    Z = _generate_Z(params.n_paths, params.tenor_m * 21, seed=42)
+    lo, hi = 0.30, params.K_pct - 0.01
+    # NPV는 KI에 대해 단조 감소 (KI 낮을수록 위험 낮아 NPV 높음)
+    if _mc_from_Z(Z, _replace(params, KI_pct=hi)) > target_npv:
+        return hi  # 해 없음 (쿠폰이 너무 낮아 최대 KI에서도 NPV > target)
+    return _bisect(Z, params, "KI_pct", lo, hi, target_npv)
+
+
+def fair_ko(params: FCNParams, target_npv: float = 1.0) -> float:
+    """목표 쿠폰 고정 → NPV = target 이 되는 KO Barrier (KO_pct) 역산
+    KO ↓ → autocall 빈번 → 기대 쿠폰 수입 감소 → NPV 감소
+    KO 범위: 0.90 ~ 1.30
+    """
+    Z = _generate_Z(params.n_paths, params.tenor_m * 21, seed=42)
+    return _bisect(Z, params, "KO_pct", 0.90, 1.30, target_npv)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -372,13 +412,55 @@ with st.sidebar:
                          min_value=1.0, step=100.0, format="%.2f")
 
     st.markdown("---")
+    st.markdown("### 🎯 Solve Mode")
+    solve_mode = st.radio(
+        "구할 파라미터",
+        ["쿠폰 계산 (Strike → Coupon)",
+         "Strike 역산 (Coupon → Strike)",
+         "KI 역산 (Coupon → KI Barrier)",
+         "KO 역산 (Coupon → KO Level)"],
+        index=0,
+    )
+
+    st.markdown("---")
     st.markdown("### FCN 조건")
-    K_pct     = st.slider("Strike (%)",              min_value=70, max_value=105, value=90,  step=1) / 100
-    KI_pct    = st.slider("KI Barrier (%)",          min_value=40, max_value=85,  value=65,  step=1) / 100
-    KO_pct    = st.slider("KO (Autocall) (%)",       min_value=90, max_value=120, value=100, step=1) / 100
-    tenor_m   = st.slider("만기 (개월)",              min_value=1,  max_value=24,  value=6,   step=1)
-    nc_months = st.slider("Non-call period (개월)",   min_value=0,  max_value=tenor_m-1, value=0, step=1)
-    coupon_pa_pct = st.slider("쿠폰 (% p.a.)",        min_value=0,  max_value=100, value=20,  step=1)
+
+    # 각 모드에서 고정 입력 / 역산 출력 구분
+    solve_coupon = solve_mode.startswith("쿠폰")
+    solve_strike = solve_mode.startswith("Strike")
+    solve_ki     = solve_mode.startswith("KI")
+    solve_ko     = solve_mode.startswith("KO")
+
+    # Strike: 쿠폰 계산 모드에서만 슬라이더 (나머지는 입력)
+    if solve_strike:
+        st.info("🎯 Strike를 역산합니다", icon=None)
+        K_pct = 0.90  # placeholder (계산 결과로 대체)
+    else:
+        K_pct = st.slider("Strike (%)", min_value=70, max_value=105, value=90, step=1) / 100
+
+    # KI
+    if solve_ki:
+        st.info("🎯 KI Barrier를 역산합니다", icon=None)
+        KI_pct = 0.65  # placeholder
+    else:
+        KI_pct = st.slider("KI Barrier (%)", min_value=40, max_value=85, value=65, step=1) / 100
+
+    # KO
+    if solve_ko:
+        st.info("🎯 KO Level을 역산합니다", icon=None)
+        KO_pct = 1.00  # placeholder
+    else:
+        KO_pct = st.slider("KO (Autocall) (%)", min_value=90, max_value=120, value=100, step=1) / 100
+
+    tenor_m   = st.slider("만기 (개월)", min_value=1, max_value=24, value=6, step=1)
+    nc_months = st.slider("Non-call period (개월)", min_value=0, max_value=tenor_m-1, value=0, step=1)
+
+    # 쿠폰: 쿠폰 계산 모드일 때만 역산, 나머지는 목표 쿠폰 입력
+    if solve_coupon:
+        st.info("🎯 Fair Coupon을 역산합니다", icon=None)
+        coupon_pa_pct = 20  # placeholder
+    else:
+        coupon_pa_pct = st.slider("목표 쿠폰 (% p.a.)", min_value=0, max_value=100, value=20, step=1)
 
     st.markdown("---")
     st.markdown("### 시장 파라미터")
@@ -431,17 +513,58 @@ with col_r:
 
 # ── 계산 실행 ────────────────────────────────────────────────────
 if run_btn:
-    params = FCNParams(
+    # ── Solve Mode: 역산 먼저 수행 ─────────────────────────────
+    # 역산 파라미터는 placeholder로 넣었으므로 실제 값으로 교체
+    base_params = FCNParams(
         S0=S0, K_pct=K_pct, KI_pct=KI_pct, KO_pct=KO_pct,
         tenor_m=tenor_m, nc_months=nc_months,
         coupon_pa=coupon_pa_pct/100, sigma=sigma, r=r,
         notional=notional, n_paths=n_paths,
     )
 
+    solved_label = ""
+    solved_value = ""
+
+    if solve_coupon:
+        with st.spinner("Fair Coupon 역산 중..."):
+            fc_pa = fair_coupon_pa(base_params)
+        params = _replace(base_params, coupon_pa=fc_pa)
+        solved_label = "🎯 Fair Coupon (p.a.)"
+        solved_value = f"{fc_pa*100:.2f}%"
+
+    elif solve_strike:
+        with st.spinner("Fair Strike 역산 중..."):
+            fk = fair_strike(base_params)
+        params = _replace(base_params, K_pct=fk)
+        solved_label = "🎯 Fair Strike"
+        solved_value = f"${S0*fk:,.0f}  ({fk*100:.1f}%)"
+        K_pct = fk   # 이후 차트용
+
+    elif solve_ki:
+        with st.spinner("Fair KI Barrier 역산 중..."):
+            fki = fair_ki(base_params)
+        params = _replace(base_params, KI_pct=fki)
+        solved_label = "🎯 Fair KI Barrier"
+        solved_value = f"${S0*fki:,.0f}  ({fki*100:.1f}%)"
+        KI_pct = fki
+
+    elif solve_ko:
+        with st.spinner("Fair KO Level 역산 중..."):
+            fko = fair_ko(base_params)
+        params = _replace(base_params, KO_pct=fko)
+        solved_label = "🎯 Fair KO Level"
+        solved_value = f"${S0*fko:,.0f}  ({fko*100:.1f}%)"
+        KO_pct = fko
+
+    # 역산 결과 강조 배너
+    if solved_label:
+        st.success(f"**{solved_label}** = **{solved_value}**  *(at-par NPV 기준)*")
+
     with st.spinner(f"Monte Carlo {n_paths:,}경로 시뮬레이션 중..."):
         result = run_mc(params)
 
-    with st.spinner("Fair coupon 역산 중..."):
+    # 쿠폰 계산 모드가 아닐 때는 역산된 params로 fair_coupon도 재계산
+    if not solve_coupon:
         fc_pa = fair_coupon_pa(params)
 
     # ── 메인 메트릭 ─────────────────────────────────────────────
@@ -450,7 +573,10 @@ if run_btn:
 
     c1,c2,c3,c4 = st.columns(4)
     with c1: st.markdown(mbox("FCN NPV", f"{npv_pct:.2f}%", "green" if npv_pct>=99.5 else "red"), unsafe_allow_html=True)
-    with c2: st.markdown(mbox("Fair Coupon (p.a.)", f"{fc_pa*100:.2f}%", "yellow"), unsafe_allow_html=True)
+    with c2:
+        label2 = "Fair Coupon (p.a.)" if not solve_coupon else "🎯 Fair Coupon (p.a.)"
+        color2 = "green" if solve_coupon else "yellow"
+        st.markdown(mbox(label2, f"{fc_pa*100:.2f}%", color2), unsafe_allow_html=True)
     with c3: st.markdown(mbox("Autocall 확률", f"{result['ko_prob']*100:.1f}%", "blue"), unsafe_allow_html=True)
     with c4:
         avg_ko = result["avg_ko_time"]
@@ -458,10 +584,24 @@ if run_btn:
 
     c5,c6,c7,c8 = st.columns(4)
     ci_lo, ci_hi = result["npv_95ci"]
-    with c5: st.markdown(mbox("KI 발동 확률 (생존)",  f"{result['ki_prob']*100:.1f}%",  "red"),  unsafe_allow_html=True)
-    with c6: st.markdown(mbox("원금손실 확률",         f"{result['loss_prob']*100:.1f}%", "red"),  unsafe_allow_html=True)
-    with c7: st.markdown(mbox("평균 원금손실 (KI 시)", f"{result['avg_loss']*100:.1f}%",  "red"),  unsafe_allow_html=True)
-    with c8: st.markdown(mbox("NPV 95% CI", f"[{ci_lo*100:.2f}%, {ci_hi*100:.2f}%]"),              unsafe_allow_html=True)
+    with c5:
+        label5 = "🎯 Strike K" if solve_strike else "Strike K"
+        color5 = "green" if solve_strike else ""
+        st.markdown(mbox(label5, f"${params.K:,.0f} ({params.K_pct*100:.1f}%)", color5), unsafe_allow_html=True)
+    with c6:
+        label6 = "🎯 KI Barrier" if solve_ki else "KI Barrier"
+        color6 = "green" if solve_ki else ""
+        st.markdown(mbox(label6, f"${params.KI:,.0f} ({params.KI_pct*100:.1f}%)", color6), unsafe_allow_html=True)
+    with c7:
+        label7 = "🎯 KO Level" if solve_ko else "KO Level"
+        color7 = "green" if solve_ko else ""
+        st.markdown(mbox(label7, f"${params.KO:,.0f} ({params.KO_pct*100:.1f}%)", color7), unsafe_allow_html=True)
+    with c8: st.markdown(mbox("NPV 95% CI", f"[{ci_lo*100:.2f}%, {ci_hi*100:.2f}%]"), unsafe_allow_html=True)
+
+    c9,c10,c11 = st.columns(3)
+    with c9:  st.markdown(mbox("KI 발동 확률 (생존)",  f"{result['ki_prob']*100:.1f}%",  "red"),  unsafe_allow_html=True)
+    with c10: st.markdown(mbox("원금손실 확률",         f"{result['loss_prob']*100:.1f}%", "red"),  unsafe_allow_html=True)
+    with c11: st.markdown(mbox("평균 원금손실 (KI 시)", f"{result['avg_loss']*100:.1f}%",  "red"),  unsafe_allow_html=True)
 
     # ── Greeks ──────────────────────────────────────────────────
     if run_greeks:
