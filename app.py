@@ -89,7 +89,7 @@ def show_login_page():
 
         col_f1, col_f2, col_f3 = st.columns(3)
         col_f4, col_f5, col_f6 = st.columns(3)
-        col_f7, _, _ = st.columns(3)
+        col_f7, _ = st.columns([1, 2])
 
         with col_f1:
             st.markdown(
@@ -200,8 +200,10 @@ def show_dashboard():
         st.page_link("pages/3_Custom_Candle_Returns.py", label="Custom Candle Returns", icon="📈")
         st.page_link("pages/4_Strategy_PnL_Summary.py", label="Strategy PnL Summary", icon="💰")
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
+        st.page_link("pages/6_Call_Ratio_Pricer.py", label="Call Ratio Pricer", icon="📐")
         st.page_link("pages/7_Weekly_BTC_Research.py", label="Weekly BTC Research", icon="🔬")
         st.page_link("pages/8_TMA_Scanner.py", label="TMA Scanner", icon="📌")
+        st.page_link("pages/9_FCN_Pricer.py", label="FCN Pricer", icon="🔷")
 
     # Main content
     st.markdown('<h1 class="dashboard-title">VERONICA Dashboard</h1>', unsafe_allow_html=True)
@@ -312,6 +314,22 @@ def show_dashboard():
     col7, col8 = st.columns(2)
 
     with col7:
+        st.markdown("### 📐 Call Ratio Pricer")
+        st.markdown(
+            """
+            Call ratio spread pricing for any crypto or equity asset.
+
+            **Key Features:**
+            - Multi-asset: Crypto (OKX) + Equity (yfinance)
+            - Black-Scholes pricing with Greeks
+            - Expiry P&L chart with margin holding
+            - Historical probability & scenario analysis
+            """
+        )
+        if st.button("Call Ratio Pricer 열기", key="open_ratio_pricer", use_container_width=True):
+            st.switch_page("pages/6_Call_Ratio_Pricer.py")
+
+    with col8:
         st.markdown("### 📌 TMA Scanner")
         st.markdown(
             """
@@ -326,6 +344,23 @@ def show_dashboard():
         )
         if st.button("TMA Scanner 열기", key="open_tma_scanner", use_container_width=True):
             st.switch_page("pages/8_TMA_Scanner.py")
+
+    col9, _ = st.columns(2)
+    with col9:
+        st.markdown("### 🔷 FCN Pricer")
+        st.markdown(
+            """
+            Fixed Coupon Note pricer for BTC/ETH.
+
+            **주요 기능:**
+            - GBM Monte Carlo (Daily KI + Monthly Autocall)
+            - Fair coupon 역산 (공통난수 이진탐색)
+            - Greeks: Delta · Vega · Theta · Rho
+            - Spot × Vol NPV Heatmap
+            """
+        )
+        if st.button("FCN Pricer 열기", key="open_fcn_pricer", use_container_width=True):
+            st.switch_page("pages/9_FCN_Pricer.py")
 
     st.markdown("---")
 
