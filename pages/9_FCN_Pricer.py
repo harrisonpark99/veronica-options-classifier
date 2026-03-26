@@ -46,6 +46,7 @@ class FCNParams:
     coupon_pa: float    # 연간 쿠폰 (e.g. 0.20)
     sigma: float        # 연환산 변동성
     r: float            # 무위험이자율
+    ki_steps: int = 1   # KI 관찰 주기: 1=Daily, 5=Weekly, 21=Monthly
     notional: float = 1_000_000.0
     n_paths: int = 50_000
 
@@ -63,7 +64,7 @@ def _replace(p: FCNParams, **kwargs) -> FCNParams:
     """FCNParams 필드 일부만 교체해서 새 인스턴스 반환"""
     d = {f: getattr(p, f) for f in
          ["S0","K_pct","KI_pct","KO_pct","tenor_m","nc_months",
-          "coupon_pa","sigma","r","notional","n_paths"]}
+          "coupon_pa","sigma","r","ki_steps","notional","n_paths"]}
     d.update(kwargs)
     return FCNParams(**d)
 
@@ -103,8 +104,11 @@ def _mc_from_Z(Z: np.ndarray, p: FCNParams) -> float:
     S_paths = p.S0 * np.exp(np.cumsum(log_ret, axis=1))
     S_T = S_paths[:, -1]
 
-    # Daily KI
-    daily_ki = S_paths.min(axis=1) < p.KI
+    # KI 관찰 (주기별)
+    ki_obs_idx = list(range(p.ki_steps - 1, n_steps, p.ki_steps))
+    if not ki_obs_idx or ki_obs_idx[-1] != n_steps - 1:
+        ki_obs_idx.append(n_steps - 1)
+    daily_ki = (S_paths[:, ki_obs_idx] < p.KI).any(axis=1)
 
     # Monthly KO
     obs_idx   = [min(i*21 - 1, n_steps-1) for i in range(1, p.tenor_m+1)]
@@ -455,6 +459,13 @@ with st.sidebar:
     tenor_m   = st.slider("만기 (개월)", min_value=1, max_value=24, value=6, step=1)
     nc_months = st.slider("Non-call period (개월)", min_value=0, max_value=tenor_m-1, value=0, step=1)
 
+    ki_freq_label = st.selectbox(
+        "KI 관찰 주기",
+        ["Daily (매일)", "Weekly (매주)", "Monthly (매월)"],
+        index=0,
+    )
+    ki_steps = {"Daily (매일)": 1, "Weekly (매주)": 5, "Monthly (매월)": 21}[ki_freq_label]
+
     # 쿠폰: 쿠폰 계산 모드일 때만 역산, 나머지는 목표 쿠폰 입력
     if solve_coupon:
         st.info("🎯 Fair Coupon을 역산합니다", icon=None)
@@ -488,12 +499,13 @@ T = tenor_m / 12
 with col_l:
     st.markdown('<div class="section-title">파라미터 요약</div>', unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
-        "항목": ["기초자산", "S₀", "Strike K", "KI Barrier", "KO (Autocall)",
-                 "만기", "Non-call", "쿠폰 p.a.", "σ", "r"],
+        "항목": ["기초자산", "S₀", "Strike K", "KI Barrier", "KI 관찰",
+                 "KO (Autocall)", "만기", "Non-call", "쿠폰 p.a.", "σ", "r"],
         "값": [
             asset, f"${S0:,.2f}",
             f"${S0*K_pct:,.2f}  ({K_pct*100:.0f}%)",
             f"${S0*KI_pct:,.2f}  ({KI_pct*100:.0f}%)",
+            ki_freq_label,
             f"${S0*KO_pct:,.2f}  ({KO_pct*100:.0f}%)",
             f"{tenor_m}개월", f"{nc_months}개월",
             f"{coupon_pa_pct:.0f}% p.a.", f"{sigma*100:.0f}%", f"{r*100:.1f}%",
@@ -519,7 +531,7 @@ if run_btn:
         S0=S0, K_pct=K_pct, KI_pct=KI_pct, KO_pct=KO_pct,
         tenor_m=tenor_m, nc_months=nc_months,
         coupon_pa=coupon_pa_pct/100, sigma=sigma, r=r,
-        notional=notional, n_paths=n_paths,
+        ki_steps=ki_steps, notional=notional, n_paths=n_paths,
     )
 
     solved_label = ""
