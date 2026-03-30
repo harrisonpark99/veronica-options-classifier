@@ -425,44 +425,42 @@ def build_portal_invoice_workbook(
     ws["E5"].font = Font(bold=True)
 
     n_data = len(df)
-    # P/Q/R columns (16/17/18) hold totals at row 15 — same cell refs as Binance sheet
-    # For portal: totals are written directly (no formula dependency on raw data cols)
     total_row = 15
 
     if side == "BUY":
         ws["A6"] = "Filled Amount:"
-        ws["B6"] = f"=P{total_row}"
+        ws["B6"] = filled_amount
         ws["C6"] = f"({base_asset})"
 
         ws["E6"] = "Order type"
         ws["F6"] = "Buy"
 
         ws["A7"] = "Filled Value:"
-        ws["B7"] = f"=Q{total_row}"
+        ws["B7"] = filled_value
         ws["C7"] = "(USDT)"
 
         ws["E7"] = "Buy order amount"
-        ws["F7"] = f"=Q{total_row}"
+        ws["F7"] = truncate_usdt(gross)
         ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
-        ws["B8"] = f"=R{total_row}"
+        ws["B8"] = avg_price
         ws["C8"] = f"(USDT/{base_asset})"
 
         ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["F8"] = truncate_usdt(fee_amount)
         ws["G8"] = "(USDT)"
 
         ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
-        ws["B9"] = "=F8"
+        ws["B9"] = truncate_usdt(fee_amount)
         ws["C9"] = "(USDT)"
 
         ws["E9"] = "Net of fee Buy order amount"
-        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["F9"] = truncate_usdt(gross - fee_amount)
         ws["G9"] = "(USDT)"
 
         ws["A10"] = "Settlement Amount:"
-        ws["B10"] = "=B6"
+        ws["B10"] = filled_amount
         ws["C10"] = f"({base_asset})"
 
         if rebate_usdt and rebate_usdt != 0:
@@ -470,38 +468,38 @@ def build_portal_invoice_workbook(
 
     else:  # SELL
         ws["A6"] = "Filled Amount:"
-        ws["B6"] = f"=P{total_row}"
+        ws["B6"] = filled_amount
         ws["C6"] = f"({base_asset})"
 
         ws["E6"] = "Order type"
         ws["F6"] = "Sell"
 
         ws["A7"] = "Filled Value:"
-        ws["B7"] = f"=Q{total_row}"
+        ws["B7"] = filled_value
         ws["C7"] = "(USDT)"
 
         ws["E7"] = "Sell order amount"
-        ws["F7"] = f"=Q{total_row}"
+        ws["F7"] = truncate_usdt(gross)
         ws["G7"] = "(USDT)"
 
         ws["A8"] = "Average Filled Price:"
-        ws["B8"] = f"=R{total_row}"
+        ws["B8"] = avg_price
         ws["C8"] = f"(USDT/{base_asset})"
 
         ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
-        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["F8"] = truncate_usdt(fee_amount)
         ws["G8"] = "(USDT)"
 
         ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
-        ws["B9"] = "=F8"
+        ws["B9"] = truncate_usdt(fee_amount)
         ws["C9"] = "(USDT)"
 
         ws["E9"] = "Net of fee Sell order amount"
-        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["F9"] = truncate_usdt(net)
         ws["G9"] = "(USDT)"
 
         ws["A10"] = "Settlement Amount:"
-        ws["B10"] = "=F9"
+        ws["B10"] = truncate_usdt(net)
         ws["C10"] = "(USDT)"
 
     border_cells(ws, [
@@ -540,11 +538,6 @@ def build_portal_invoice_workbook(
             if pd.isna(val):
                 val = None
             ws.cell(row=r, column=col_idx, value=val)
-
-    # Totals in P/Q/R at total_row (columns 16/17/18)
-    ws.cell(row=total_row, column=16, value=filled_amount)
-    ws.cell(row=total_row, column=17, value=filled_value)
-    ws.cell(row=total_row, column=18, value=avg_price)
 
     # Table borders
     border_table(ws, r1=14, r2=total_row + max(n_data, 1) - 1,
