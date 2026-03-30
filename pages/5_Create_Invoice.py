@@ -75,8 +75,68 @@ TABLE_HEADERS = [
 
 
 # -----------------------------
+# Portal CSV Configuration
+# -----------------------------
+PORTAL_REQUIRED_COLS = [
+    "Order ID", "Filled Time", "Symbol", "Direction", "Filled Price",
+    "Filled Amount", "Filled Value",
+]
+PORTAL_NUMERIC_COLS = ["Filled Price", "Filled Amount", "Filled Value"]
+
+PORTAL_TABLE_HEADERS = [
+    "Order ID", "Filled Time", "fill_time(UTC+8)", "Symbol", "Direction",
+    "Filled Price", "Filled Amount", "Filled Value",
+]  # A~H (8 cols)
+
+
+# -----------------------------
 # Helper Functions
 # -----------------------------
+def compute_totals_portal(df: pd.DataFrame) -> Tuple[float, float, float]:
+    """Compute filled_amount, filled_value, avg_price from Portal template rows."""
+    filled_amount = float(pd.to_numeric(df["Filled Amount"], errors="coerce").fillna(0).sum())
+    filled_value = float(pd.to_numeric(df["Filled Value"], errors="coerce").fillna(0).sum())
+    avg_price = (filled_value / filled_amount) if filled_amount else 0.0
+    return filled_amount, filled_value, avg_price
+
+
+def ensure_fill_time_columns_portal(df: pd.DataFrame) -> pd.DataFrame:
+    """Parse 'Filled Time' (UTC string) to UTC+8 for Portal template."""
+    out = df.copy()
+    if "fill_time(UTC+8)" not in out.columns:
+        if "Filled Time" in out.columns:
+            utc = pd.to_datetime(out["Filled Time"], utc=True, errors="coerce")
+            utc8 = utc.dt.tz_convert("Asia/Shanghai")
+            out["fill_time(UTC+8)"] = utc8.dt.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            out["fill_time(UTC+8)"] = ""
+    return out
+
+
+def infer_side_from_portal(df: pd.DataFrame) -> str:
+    """Detect BUY or SELL from Direction column (e.g. BUY_ORDER / SELL_ORDER)."""
+    if "Direction" not in df.columns:
+        return "SELL"
+    val = str(df["Direction"].dropna().iloc[0]).upper()
+    return "BUY" if "BUY" in val else "SELL"
+
+
+def infer_sheet_date_portal(df: pd.DataFrame, side: str) -> str:
+    """Generate sheet name from 'fill_time(UTC+8)' column."""
+    dt = None
+    if "fill_time(UTC+8)" in df.columns and df["fill_time(UTC+8)"].notna().any():
+        s = str(df["fill_time(UTC+8)"].dropna().iloc[0])
+        try:
+            dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            dt = None
+    if dt is None:
+        dt = datetime.now()
+    if side.upper() == "BUY":
+        return dt.strftime("%y%m%d")
+    return dt.strftime("%Y%m%d")
+
+
 def compute_totals(df: pd.DataFrame) -> Tuple[float, float, float, float]:
     """Compute filled_amount, filled_value, avg_price, total_commission."""
     filled_amount = float(pd.to_numeric(df["qty"], errors="coerce").fillna(0).sum())
@@ -208,6 +268,289 @@ def autofit_columns(ws, min_width: float = 8, max_width: float = 45):
                 s = str(v)
             max_len = max(max_len, len(s))
         ws.column_dimensions[col_letter].width = min(max_width, max(min_width, max_len + 2))
+
+
+def build_portal_invoice_workbook(
+    df_raw: pd.DataFrame,
+    client: str,
+    side: str,
+    fee_rate: float,
+    rebate_usdt: float = 0.0,
+) -> Workbook:
+    """Create invoice Excel workbook for Portal template format."""
+    side = side.upper()
+    df = ensure_fill_time_columns_portal(df_raw)
+
+    # Compute totals from individual rows
+    filled_amount, filled_value, avg_price = compute_totals_portal(df)
+
+    # Fee calculations (same logic as Binance)
+    if side == "BUY":
+        net = filled_value - float(rebate_usdt)
+        gross = net / (1.0 - fee_rate) if (1.0 - fee_rate) else net
+        fee_amount = gross * fee_rate
+    else:  # SELL
+        gross = filled_value
+        fee_amount = gross * fee_rate
+        net = gross - fee_amount
+
+    sheet_date = infer_sheet_date_portal(df, side)
+    symbol = df["Symbol"].iloc[0] if "Symbol" in df.columns and len(df) > 0 else "N/A"
+    # Derive base asset: remove -USDT or USDT suffix
+    base_asset = symbol.replace("-USDT", "").replace("USDT", "") if symbol != "N/A" else "BASE"
+
+    wb = Workbook()
+
+    # =========================================================
+    # Summary Sheet
+    # =========================================================
+    ws_sum = wb.active
+    ws_sum.title = "Summary"
+
+    set_white_borders(ws_sum, max_row=100, max_col=100)
+
+    ws_sum["A1"] = "Client:"
+    ws_sum["B1"] = client
+    ws_sum["A1"].font = Font(bold=True)
+
+    ws_sum["A3"] = "Summary"
+    ws_sum["A3"].font = Font(bold=True)
+
+    ws_sum["A5"] = "Execution summary"
+    ws_sum["B5"] = "Amount"
+    ws_sum["E5"] = "Order summary"
+    ws_sum["A5"].font = Font(bold=True)
+    ws_sum["E5"].font = Font(bold=True)
+
+    if side == "BUY":
+        ws_sum["A6"] = "Filled Amount:"
+        ws_sum["B6"] = filled_amount
+        ws_sum["C6"] = f"({base_asset})"
+
+        ws_sum["E6"] = "Order type"
+        ws_sum["F6"] = "Buy"
+
+        ws_sum["A7"] = "Filled Value:"
+        ws_sum["B7"] = filled_value
+        ws_sum["C7"] = "(USDT)"
+
+        ws_sum["E7"] = "Buy order amount"
+        ws_sum["F7"] = truncate_usdt(gross)
+        ws_sum["G7"] = "(USDT)"
+
+        ws_sum["A8"] = "Average Filled Price:"
+        ws_sum["B8"] = avg_price
+        ws_sum["C8"] = f"(USDT/{base_asset})"
+
+        ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["F8"] = truncate_usdt(fee_amount)
+        ws_sum["G8"] = "(USDT)"
+
+        ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws_sum["B9"] = truncate_usdt(fee_amount)
+        ws_sum["C9"] = "(USDT)"
+
+        ws_sum["E9"] = "Net of fee Buy order amount"
+        ws_sum["F9"] = truncate_usdt(gross - fee_amount)
+        ws_sum["G9"] = "(USDT)"
+
+        ws_sum["A10"] = "Settlement Amount:"
+        ws_sum["B10"] = filled_amount
+        ws_sum["C10"] = f"({base_asset})"
+
+        if rebate_usdt and rebate_usdt != 0:
+            ws_sum["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
+
+    else:  # SELL
+        ws_sum["A6"] = "Filled Amount:"
+        ws_sum["B6"] = filled_amount
+        ws_sum["C6"] = f"({base_asset})"
+
+        ws_sum["E6"] = "Order type"
+        ws_sum["F6"] = "Sell"
+
+        ws_sum["A7"] = "Filled Value:"
+        ws_sum["B7"] = filled_value
+        ws_sum["C7"] = "(USDT)"
+
+        ws_sum["E7"] = "Sell order amount"
+        ws_sum["F7"] = truncate_usdt(gross)
+        ws_sum["G7"] = "(USDT)"
+
+        ws_sum["A8"] = "Average Filled Price:"
+        ws_sum["B8"] = avg_price
+        ws_sum["C8"] = f"(USDT/{base_asset})"
+
+        ws_sum["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws_sum["F8"] = truncate_usdt(fee_amount)
+        ws_sum["G8"] = "(USDT)"
+
+        ws_sum["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws_sum["B9"] = truncate_usdt(fee_amount)
+        ws_sum["C9"] = "(USDT)"
+
+        ws_sum["E9"] = "Net of fee Sell order amount"
+        ws_sum["F9"] = truncate_usdt(net)
+        ws_sum["G9"] = "(USDT)"
+
+        ws_sum["A10"] = "Settlement Amount:"
+        ws_sum["B10"] = truncate_usdt(net)
+        ws_sum["C10"] = "(USDT)"
+
+    border_cells(ws_sum, [
+        "A6", "B6", "E6", "F6",
+        "A7", "B7", "E7", "F7",
+        "A8", "B8", "E8", "F8",
+        "A9", "B9", "E9", "F9",
+        "A10", "B10",
+    ])
+    autofit_columns(ws_sum, min_width=10, max_width=45)
+
+    # =========================================================
+    # Date Sheet (Trading Data)
+    # =========================================================
+    ws = wb.create_sheet(sheet_date)
+
+    ws["A1"] = "Client:"
+    ws["B1"] = client
+    ws["A1"].font = Font(bold=True)
+
+    ws["A3"] = "Summary"
+    ws["A3"].font = Font(bold=True)
+
+    ws["A5"] = "Execution summary"
+    ws["B5"] = "Amount"
+    ws["E5"] = "Order summary"
+    ws["A5"].font = Font(bold=True)
+    ws["E5"].font = Font(bold=True)
+
+    n_data = len(df)
+    # P/Q/R columns (16/17/18) hold totals at row 15 — same cell refs as Binance sheet
+    # For portal: totals are written directly (no formula dependency on raw data cols)
+    total_row = 15
+
+    if side == "BUY":
+        ws["A6"] = "Filled Amount:"
+        ws["B6"] = f"=P{total_row}"
+        ws["C6"] = f"({base_asset})"
+
+        ws["E6"] = "Order type"
+        ws["F6"] = "Buy"
+
+        ws["A7"] = "Filled Value:"
+        ws["B7"] = f"=Q{total_row}"
+        ws["C7"] = "(USDT)"
+
+        ws["E7"] = "Buy order amount"
+        ws["F7"] = f"=Q{total_row}"
+        ws["G7"] = "(USDT)"
+
+        ws["A8"] = "Average Filled Price:"
+        ws["B8"] = f"=R{total_row}"
+        ws["C8"] = f"(USDT/{base_asset})"
+
+        ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["G8"] = "(USDT)"
+
+        ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws["B9"] = "=F8"
+        ws["C9"] = "(USDT)"
+
+        ws["E9"] = "Net of fee Buy order amount"
+        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["G9"] = "(USDT)"
+
+        ws["A10"] = "Settlement Amount:"
+        ws["B10"] = "=B6"
+        ws["C10"] = f"({base_asset})"
+
+        if rebate_usdt and rebate_usdt != 0:
+            ws["A11"] = f"*CEX rebate USDT {rebate_usdt:.2f} included"
+
+    else:  # SELL
+        ws["A6"] = "Filled Amount:"
+        ws["B6"] = f"=P{total_row}"
+        ws["C6"] = f"({base_asset})"
+
+        ws["E6"] = "Order type"
+        ws["F6"] = "Sell"
+
+        ws["A7"] = "Filled Value:"
+        ws["B7"] = f"=Q{total_row}"
+        ws["C7"] = "(USDT)"
+
+        ws["E7"] = "Sell order amount"
+        ws["F7"] = f"=Q{total_row}"
+        ws["G7"] = "(USDT)"
+
+        ws["A8"] = "Average Filled Price:"
+        ws["B8"] = f"=R{total_row}"
+        ws["C8"] = f"(USDT/{base_asset})"
+
+        ws["E8"] = f"Fee({fee_rate*100:.2f}%)"
+        ws["F8"] = f"=TRUNC(F7*{fee_rate},2)"
+        ws["G8"] = "(USDT)"
+
+        ws["A9"] = f"Fee ({fee_rate*100:.2f}%)"
+        ws["B9"] = "=F8"
+        ws["C9"] = "(USDT)"
+
+        ws["E9"] = "Net of fee Sell order amount"
+        ws["F9"] = "=TRUNC(F7-F8,2)"
+        ws["G9"] = "(USDT)"
+
+        ws["A10"] = "Settlement Amount:"
+        ws["B10"] = "=F9"
+        ws["C10"] = "(USDT)"
+
+    border_cells(ws, [
+        "A6", "B6", "E6", "F6",
+        "A7", "B7", "E7", "F7",
+        "A8", "B8", "E8", "F8",
+        "A9", "B9", "E9", "F9",
+        "A10", "B10",
+    ])
+
+    autofit_columns(ws, min_width=10, max_width=45)
+
+    # =========================================================
+    # Trading Data section (Portal columns)
+    # =========================================================
+    ws["A13"] = "Trading Data"
+    ws["A13"].font = Font(bold=True)
+
+    # Header row 14
+    for col_idx, h in enumerate(PORTAL_TABLE_HEADERS, start=1):
+        ws.cell(row=14, column=col_idx, value=h)
+    style_header(ws, row=14, start_col=1, end_col=len(PORTAL_TABLE_HEADERS))
+
+    # Prepare data
+    df_out = df.copy()
+    for h in PORTAL_TABLE_HEADERS:
+        if h not in df_out.columns:
+            df_out[h] = None
+
+    # Write data rows starting at row 15
+    for i in range(n_data):
+        r = total_row + i
+        row = df_out.iloc[i]
+        for col_idx, h in enumerate(PORTAL_TABLE_HEADERS, start=1):
+            val = row[h]
+            if pd.isna(val):
+                val = None
+            ws.cell(row=r, column=col_idx, value=val)
+
+    # Totals in P/Q/R at total_row (columns 16/17/18)
+    ws.cell(row=total_row, column=16, value=filled_amount)
+    ws.cell(row=total_row, column=17, value=filled_value)
+    ws.cell(row=total_row, column=18, value=avg_price)
+
+    # Table borders
+    border_table(ws, r1=14, r2=total_row + max(n_data, 1) - 1,
+                 c1=1, c2=len(PORTAL_TABLE_HEADERS))
+
+    return wb
 
 
 def build_invoice_workbook(
@@ -524,115 +867,217 @@ st.caption("Generate invoice from trade execution CSV")
 with st.sidebar:
     st.header("Settings")
 
-    # 1. Order Side
-    st.subheader("1. Order Type")
-    order_side = st.radio(
-        "Select BUY/SELL",
-        options=["BUY", "SELL"],
+    # 1. Template Type
+    st.subheader("1. Template Type")
+    template_type = st.radio(
+        "Select trade history format",
+        options=["Binance", "Portal"],
         horizontal=True
     )
+
+    st.markdown("---")
+
+    # 2. Order Side (Portal: auto-detected from Direction col, but allow override)
+    st.subheader("2. Order Type")
+    if template_type == "Portal":
+        order_side = st.radio(
+            "Select BUY/SELL (auto-detected from Direction if not changed)",
+            options=["BUY", "SELL"],
+            horizontal=True
+        )
+    else:
+        order_side = st.radio(
+            "Select BUY/SELL",
+            options=["BUY", "SELL"],
+            horizontal=True
+        )
     selected_side = order_side
 
     st.markdown("---")
 
-    # 2. CEX Selection
-    st.subheader("2. Exchange")
-    cex_option = st.radio(
-        "Select CEX",
-        options=["Binance", "Others"],
-        horizontal=True
-    )
-
-    st.markdown("---")
-
-    # 3. Additional Settings (Binance only)
-    if cex_option == "Binance":
-        st.subheader("3. Details")
-        client = st.text_input("Client", value="")
-        fee_rate = st.number_input(
-            "Fee rate (e.g. 0.25% = 0.0025)",
-            value=0.0025,
-            step=0.0001,
-            format="%.6f"
+    # 3. CEX Selection (Binance only)
+    if template_type == "Binance":
+        st.subheader("3. Exchange")
+        cex_option = st.radio(
+            "Select CEX",
+            options=["Binance", "Others"],
+            horizontal=True
         )
-        if selected_side == "BUY":
-            rebate_usdt = st.number_input(
-                "CEX Rebate (USDT)",
-                value=0.0,
-                step=0.01,
-                format="%.2f",
-                help="CEX rebate amount for BUY orders"
-            )
-        else:
-            rebate_usdt = 0.0
+        st.markdown("---")
+    else:
+        cex_option = "Binance"  # Portal always treated as single exchange flow
+
+    # 4. Details
+    st.subheader("3. Details" if template_type == "Portal" else "4. Details")
+    client = st.text_input("Client", value="")
+    fee_rate = st.number_input(
+        "Fee rate (e.g. 0.25% = 0.0025)",
+        value=0.0025,
+        step=0.0001,
+        format="%.6f"
+    )
+    if selected_side == "BUY":
+        rebate_usdt = st.number_input(
+            "CEX Rebate (USDT)",
+            value=0.0,
+            step=0.01,
+            format="%.2f",
+            help="CEX rebate amount for BUY orders"
+        )
+    else:
+        rebate_usdt = 0.0
 
 # Main content
-if cex_option == "Others":
+if template_type == "Binance" and cex_option == "Others":
     st.warning("Currently only Binance is supported. Other exchanges coming soon.")
     st.stop()
 
+# -------------------------------------------------------
+# Portal flow
+# -------------------------------------------------------
+if template_type == "Portal":
+    st.subheader("Upload Trade History (Portal)")
+    csv_file = st.file_uploader("Portal trade history CSV/TSV file", type=["csv", "tsv", "txt"])
+
+    if csv_file:
+        try:
+            # Try tab-separated first (portal export is often TSV)
+            raw = csv_file.read()
+            csv_file.seek(0)
+            sample = raw[:2048].decode("utf-8", errors="replace")
+            sep = "\t" if sample.count("\t") > sample.count(",") else ","
+            df = pd.read_csv(io.BytesIO(raw), sep=sep)
+        except Exception as e:
+            st.error(f"Failed to read file: {e}")
+            st.stop()
+
+        df.columns = [c.strip() for c in df.columns]
+        missing = [c for c in PORTAL_REQUIRED_COLS if c not in df.columns]
+        if missing:
+            st.error(f"Missing required columns (Portal format): {missing}")
+            st.stop()
+
+        for col in PORTAL_NUMERIC_COLS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        # Auto-detect side from Direction column
+        auto_side = infer_side_from_portal(df)
+        if auto_side != selected_side:
+            st.info(f"Direction column detected as **{auto_side}** — overriding sidebar selection.")
+            selected_side = auto_side
+
+        df_prepared = ensure_fill_time_columns_portal(df)
+        filled_amount, filled_value, avg_price = compute_totals_portal(df_prepared)
+
+        st.subheader("Trade Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Rows", f"{len(df):,}")
+        col2.metric("Side", selected_side)
+        col3.metric("Filled Amount", f"{filled_amount:,.8f}")
+        col4.metric("Filled Value", f"{filled_value:,.2f} USDT")
+
+        st.caption(f"Average Price: {avg_price:,.6f} USDT")
+
+        with st.expander("Preview Trade History", expanded=False):
+            st.dataframe(df.head(30), use_container_width=True)
+
+        st.markdown("---")
+
+        if st.button("Generate Invoice", type="primary", use_container_width=True):
+            wb = build_portal_invoice_workbook(
+                df_raw=df,
+                client=client,
+                side=selected_side,
+                fee_rate=float(fee_rate),
+                rebate_usdt=float(rebate_usdt) if selected_side == "BUY" else 0.0,
+            )
+
+            out = io.BytesIO()
+            wb.save(out)
+            out.seek(0)
+
+            symbol_raw = df["Symbol"].iloc[0] if df["Symbol"].nunique() == 1 else "multi"
+            symbol_clean = symbol_raw.replace("-", "")
+            date_str = datetime.now().strftime("%Y%m%d")
+            file_name = f"invoice_{symbol_clean}_{selected_side.lower()}_{date_str}.xlsx"
+
+            st.success("Invoice generated successfully!")
+            st.download_button(
+                label="Download Invoice XLSX",
+                data=out.getvalue(),
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    else:
+        st.info("Upload a Portal trade history file to generate an invoice.")
+
+# -------------------------------------------------------
 # Binance flow
-st.subheader("Upload Trade History")
-csv_file = st.file_uploader("Trade history CSV file", type=["csv"])
-
-if csv_file:
-    try:
-        df = pd.read_csv(csv_file)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        st.stop()
-
-    df.columns = [c.strip() for c in df.columns]
-    missing = [c for c in BINANCE_REQUIRED_COLS if c not in df.columns]
-    if missing:
-        st.error(f"Missing required columns (Binance format): {missing}")
-        st.stop()
-
-    for col in BINANCE_NUMERIC_COLS:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    df_prepared = ensure_fill_time_columns(df)
-    filled_amount, filled_value, avg_price, total_commission = compute_totals(df_prepared)
-
-    st.subheader("Trade Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Rows", f"{len(df):,}")
-    col2.metric("Side", selected_side)
-    col3.metric("Filled Amount", f"{filled_amount:,.8f}")
-    col4.metric("Filled Value", f"{filled_value:,.2f} USDT")
-
-    st.caption(f"Average Price: {avg_price:,.2f} USDT | Total Commission: {total_commission:,.8f}")
-
-    with st.expander("Preview Trade History", expanded=False):
-        st.dataframe(df.head(30), use_container_width=True)
-
-    st.markdown("---")
-
-    if st.button("Generate Invoice", type="primary", use_container_width=True):
-        wb = build_invoice_workbook(
-            df_raw=df,
-            client=client,
-            side=selected_side,
-            fee_rate=float(fee_rate),
-            rebate_usdt=float(rebate_usdt) if selected_side == "BUY" else 0.0,
-        )
-
-        out = io.BytesIO()
-        wb.save(out)
-        out.seek(0)
-
-        symbol = df["symbol"].iloc[0] if df["symbol"].nunique() == 1 else "multi"
-        date_str = datetime.now().strftime("%Y%m%d")
-        file_name = f"invoice_{symbol}_{selected_side.lower()}_{date_str}.xlsx"
-
-        st.success("Invoice generated successfully!")
-        st.download_button(
-            label="Download Invoice XLSX",
-            data=out.getvalue(),
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
+# -------------------------------------------------------
 else:
-    st.info("Upload a Binance trade history CSV file to generate an invoice.")
+    st.subheader("Upload Trade History (Binance)")
+    csv_file = st.file_uploader("Trade history CSV file", type=["csv"])
+
+    if csv_file:
+        try:
+            df = pd.read_csv(csv_file)
+        except Exception as e:
+            st.error(f"Failed to read CSV: {e}")
+            st.stop()
+
+        df.columns = [c.strip() for c in df.columns]
+        missing = [c for c in BINANCE_REQUIRED_COLS if c not in df.columns]
+        if missing:
+            st.error(f"Missing required columns (Binance format): {missing}")
+            st.stop()
+
+        for col in BINANCE_NUMERIC_COLS:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df_prepared = ensure_fill_time_columns(df)
+        filled_amount, filled_value, avg_price, total_commission = compute_totals(df_prepared)
+
+        st.subheader("Trade Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Rows", f"{len(df):,}")
+        col2.metric("Side", selected_side)
+        col3.metric("Filled Amount", f"{filled_amount:,.8f}")
+        col4.metric("Filled Value", f"{filled_value:,.2f} USDT")
+
+        st.caption(f"Average Price: {avg_price:,.2f} USDT | Total Commission: {total_commission:,.8f}")
+
+        with st.expander("Preview Trade History", expanded=False):
+            st.dataframe(df.head(30), use_container_width=True)
+
+        st.markdown("---")
+
+        if st.button("Generate Invoice", type="primary", use_container_width=True):
+            wb = build_invoice_workbook(
+                df_raw=df,
+                client=client,
+                side=selected_side,
+                fee_rate=float(fee_rate),
+                rebate_usdt=float(rebate_usdt) if selected_side == "BUY" else 0.0,
+            )
+
+            out = io.BytesIO()
+            wb.save(out)
+            out.seek(0)
+
+            symbol = df["symbol"].iloc[0] if df["symbol"].nunique() == 1 else "multi"
+            date_str = datetime.now().strftime("%Y%m%d")
+            file_name = f"invoice_{symbol}_{selected_side.lower()}_{date_str}.xlsx"
+
+            st.success("Invoice generated successfully!")
+            st.download_button(
+                label="Download Invoice XLSX",
+                data=out.getvalue(),
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    else:
+        st.info("Upload a Binance trade history CSV file to generate an invoice.")
