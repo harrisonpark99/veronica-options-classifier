@@ -202,7 +202,6 @@ def show_dashboard():
         st.page_link("pages/5_Create_Invoice.py", label="Create Invoice", icon="📄")
         st.page_link("pages/6_Call_Ratio_Pricer.py", label="Call Ratio Pricer", icon="📐")
         st.page_link("pages/7_Weekly_BTC_Research.py", label="Weekly BTC Research", icon="🔬")
-        st.page_link("pages/8_TMA_Scanner.py", label="TMA Scanner", icon="📌")
         st.page_link("pages/9_FCN_Pricer.py", label="FCN Pricer", icon="🔷")
 
     # Main content
@@ -311,7 +310,7 @@ def show_dashboard():
         if st.button("Weekly BTC Research", key="open_btc_research", use_container_width=True):
             st.switch_page("pages/7_Weekly_BTC_Research.py")
 
-    col7, col8 = st.columns(2)
+    col7, _ = st.columns(2)
 
     with col7:
         st.markdown("### 📐 Call Ratio Pricer")
@@ -328,22 +327,6 @@ def show_dashboard():
         )
         if st.button("Call Ratio Pricer 열기", key="open_ratio_pricer", use_container_width=True):
             st.switch_page("pages/6_Call_Ratio_Pricer.py")
-
-    with col8:
-        st.markdown("### 📌 TMA Scanner")
-        st.markdown(
-            """
-            US equity TMA scoring & momentum ranking scanner.
-
-            **주요 기능:**
-            - Dow 30 / S&P 100 / Nasdaq 100 / Russell Top-100
-            - Technical Merit Analysis (TMA) 종합 점수
-            - 유니버스별 & 통합 Top 랭킹
-            - 모멘텀 비교 (다중 방법론)
-            """
-        )
-        if st.button("TMA Scanner 열기", key="open_tma_scanner", use_container_width=True):
-            st.switch_page("pages/8_TMA_Scanner.py")
 
     col9, _ = st.columns(2)
     with col9:
