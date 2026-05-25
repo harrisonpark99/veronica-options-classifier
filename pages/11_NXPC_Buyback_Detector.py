@@ -201,7 +201,7 @@ def load_trades(exchange: str, hours_back: int = 24) -> pd.DataFrame:
             params=(exchange.lower(), cutoff),
         )
     if not df.empty:
-        df["ts"] = pd.to_datetime(df["ts"], utc=True)
+        df["ts"] = pd.to_datetime(df["ts"], format="ISO8601", utc=True)
     return df
 
 
