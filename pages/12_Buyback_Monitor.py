@@ -162,22 +162,31 @@ def plotly_cfg() -> dict:
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
+# data-api.binance.vision = Binance public data mirror, no geo-restriction
 _BINANCE_HOSTS = [
+    "https://data-api.binance.vision",  # public mirror — no 451
     "https://api.binance.com",
     "https://api1.binance.com",
     "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://api4.binance.com",
 ]
 
 
 def _get(url, params, retries=2):
-    """Try Binance mirror hosts automatically on 451/5xx errors."""
-    path = url.split("binance.com", 1)[-1] if "binance.com" in url else None
-    hosts = _BINANCE_HOSTS if path else [url.rsplit("/", len(url.split("/")) - 3)[0]]
+    """Try Binance mirror hosts automatically on 451/5xx/network errors."""
+    if "binance.com" in url or "binance.vision" in url:
+        # extract the path after the host
+        for marker in ["binance.vision", "binance.com"]:
+            if marker in url:
+                path = url.split(marker, 1)[1]
+                break
+        hosts = _BINANCE_HOSTS
+    else:
+        path = None
+        hosts = [url]
+
     last_exc = None
     for host in hosts:
-        full_url = (host + path) if path else url
+        full_url = (host + path) if path else host
         for _ in range(retries):
             try:
                 r = requests.get(full_url, params=params, timeout=15, verify=False)
@@ -186,7 +195,7 @@ def _get(url, params, retries=2):
             except requests.HTTPError as e:
                 if e.response is not None and e.response.status_code in (451, 403):
                     last_exc = e
-                    break  # try next host
+                    break  # geo-blocked — try next host immediately
                 last_exc = e
             except Exception as e:
                 last_exc = e
@@ -282,14 +291,14 @@ def fetch_current_price() -> float:
         data = _get("https://api.binance.com/api/v3/ticker/price", {"symbol": SYMBOL})
         return float(data["price"])
     except Exception:
-        # CoinGecko fallback (no geo-restriction)
-        cg = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "nxpc", "vs_currencies": "usd"},
+        # Bybit fallback — no geo-restriction
+        r = requests.get(
+            "https://api.bybit.com/v5/market/tickers",
+            params={"category": "spot", "symbol": SYMBOL},
             timeout=10,
         )
-        cg.raise_for_status()
-        return float(cg.json()["nxpc"]["usd"])
+        r.raise_for_status()
+        return float(r.json()["result"]["list"][0]["lastPrice"])
 
 
 # ── Computation ───────────────────────────────────────────────────────────────
