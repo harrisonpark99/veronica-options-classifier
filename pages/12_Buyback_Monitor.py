@@ -162,15 +162,35 @@ def plotly_cfg() -> dict:
 
 
 # ── API helpers ───────────────────────────────────────────────────────────────
-def _get(url, params, retries=3):
-    for i in range(retries):
-        try:
-            r = requests.get(url, params=params, timeout=15, verify=False)
-            r.raise_for_status()
-            return r.json()
-        except Exception:
-            if i == retries - 1:
-                raise
+_BINANCE_HOSTS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+]
+
+
+def _get(url, params, retries=2):
+    """Try Binance mirror hosts automatically on 451/5xx errors."""
+    path = url.split("binance.com", 1)[-1] if "binance.com" in url else None
+    hosts = _BINANCE_HOSTS if path else [url.rsplit("/", len(url.split("/")) - 3)[0]]
+    last_exc = None
+    for host in hosts:
+        full_url = (host + path) if path else url
+        for _ in range(retries):
+            try:
+                r = requests.get(full_url, params=params, timeout=15, verify=False)
+                r.raise_for_status()
+                return r.json()
+            except requests.HTTPError as e:
+                if e.response is not None and e.response.status_code in (451, 403):
+                    last_exc = e
+                    break  # try next host
+                last_exc = e
+            except Exception as e:
+                last_exc = e
+    raise last_exc
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -258,8 +278,18 @@ def fetch_agg_trades(hours_back: int = 48) -> pd.DataFrame:
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_current_price() -> float:
-    data = _get("https://api.binance.com/api/v3/ticker/price", {"symbol": SYMBOL})
-    return float(data["price"])
+    try:
+        data = _get("https://api.binance.com/api/v3/ticker/price", {"symbol": SYMBOL})
+        return float(data["price"])
+    except Exception:
+        # CoinGecko fallback (no geo-restriction)
+        cg = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "nxpc", "vs_currencies": "usd"},
+            timeout=10,
+        )
+        cg.raise_for_status()
+        return float(cg.json()["nxpc"]["usd"])
 
 
 # ── Computation ───────────────────────────────────────────────────────────────
